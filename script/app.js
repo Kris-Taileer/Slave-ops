@@ -13,6 +13,38 @@
 
 const API_BASE = '';
 const POLL_INTERVAL = 60000;
+const TOKEN_KEY = 'aether_api_token';
+
+function getToken() {
+  let t = localStorage.getItem(TOKEN_KEY);
+  if (!t) {
+    t = (prompt('API-токен панели (см. state/token):') || '').trim();
+    if (t) localStorage.setItem(TOKEN_KEY, t);
+  }
+  return t;
+}
+
+async function apiPost(path) {
+  const token = getToken();
+  if (!token) throw new Error('нет токена');
+
+  const res = await fetch(API_BASE + path, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    throw new Error('неверный токен');
+  }
+
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) {
+    throw new Error((data && data.error) || `HTTP ${res.status}`);
+  }
+  return data;
+}
 
 const services = [
   {
@@ -145,8 +177,24 @@ networks:
 
 const utils = [
   { name: 'Packmate', status: 'up', port: '8081', creds: 'admin : p@ckm4te', extra: 'iface eth0 · regex flag' },
-  { name: 'Ферма', status: 'up', port: '31337', creds: 'token : team_secret_xx', extra: 'teams 1-16 · HTTP' },
-  { name: 'Firegex', status: 'up', port: '8750', creds: 'admin : firegex', extra: 'transparent mode' }
+  {
+    key: 'farm', name: 'Ферма', status: 'up', port: '31337', creds: 'token : team_secret_xx', extra: 'teams 1-16 · HTTP',
+    actions: [
+      { action: 'up', label: 'Up', cls: 'btn-success' },
+      { action: 'restart', label: 'Restart', cls: 'btn-secondary' },
+      { action: 'down', label: 'Down', cls: 'btn-danger' },
+      { action: 'status', label: 'Status', cls: 'btn-ghost' }
+    ]
+  },
+  {
+    key: 'firegex', name: 'Firegex', status: 'up', port: '8750', creds: 'admin : firegex', extra: 'transparent mode',
+    actions: [
+      { action: 'start', label: 'Start', cls: 'btn-success' },
+      { action: 'restart', label: 'Restart', cls: 'btn-secondary' },
+      { action: 'stop', label: 'Stop', cls: 'btn-danger' },
+      { action: 'status', label: 'Status', cls: 'btn-ghost' }
+    ]
+  }
 ];
 
 const networkInfo = [
@@ -293,8 +341,12 @@ function renderUtils() {
       <div class="util-row"><span class="util-label">Credentials</span><span class="util-value">${escapeHtml(u.creds)}</span></div>
       <div class="util-row"><span class="util-label">Info</span><span class="util-value">${escapeHtml(u.extra)}</span></div>
       <div class="util-actions">
+        ${u.key ? u.actions.map(a =>
+          `<button class="btn btn-sm ${a.cls}" onclick="utilAction('${u.key}','${a.action}','${escapeHtml(u.name)}')">${escapeHtml(a.label)}</button>`
+        ).join('') : `
         <button class="btn btn-sm btn-secondary" onclick="restartUtil('${escapeHtml(u.name)}')">Restart</button>
         <button class="btn btn-sm btn-ghost" onclick="toast('info','Open ${escapeHtml(u.name)}')">Open</button>
+        `}
       </div>
     </div>
   `).join('');
@@ -532,6 +584,19 @@ function serviceAction(id, action) {
 function restartUtil(name) {
   toast('info', `${name}: restart queued`);
   addLog('info', `${name} restart requested`);
+}
+
+function utilAction(key, action, label) {
+  addLog('info', `${label}: ${action} requested`);
+  apiPost(`/api/utils/${key}/${action}`)
+    .then(() => {
+      toast('success', `${label}: ${action} queued`);
+      addLog('success', `${label}: ${action} queued on backend`);
+    })
+    .catch(err => {
+      toast('error', `${label}: ${err.message}`);
+      addLog('error', `${label} ${action} failed: ${err.message}`);
+    });
 }
 
 function scanService(id) {
