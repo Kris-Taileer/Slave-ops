@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+import argparse
+import hmac
+import json
+import mimetypes
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
+ACTIONS = {'start', 'stop', 'restart'}
+
+
+class Config:
+    monitor_sh = None
+    state_file = None
+    log_file = None
+    token_file = None
+    web_dir = None
+    token = None
+
+
+def run_monitor(args, timeout=30):
+    return subprocess.run(
+        ['bash', Config.monitor_sh] + args,
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def spawn_monitor(args):
+    subprocess.Popen(
+        ['bash', Config.monitor_sh] + args,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = 'MonitorHTTP/1.0'
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write('%s - %s\n' % (self.address_string(), fmt % args))
+
+    def _send_json(self, code, obj):
+        body = json.dumps(obj).encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path, ctype):
+        with open(path, 'rb') as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _authed(self):
+        auth = self.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return False
+        return hmac.compare_digest(auth[len('Bearer '):].strip(), Config.token)
+
+    def _read_json_body(self):
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            return None
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    def _service_exists(self, name):
+        try:
+            with open(Config.state_file) as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return name in state.get('services', {})
+
+    def _read_logs(self, tail):
+        try:
+            with open(Config.log_file) as f:
+                lines = f.readlines()[-tail:]
+        except OSError:
+            lines = []
+        entries = []
+        for line in lines:
+            parts = line.rstrip('\n').split('\t', 3)
+            if len(parts) == 4:
+                entries.append({'time': parts[0], 'level': parts[1], 'service': parts[2], 'msg': parts[3]})
+        return entries
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path.startswith('/api/'):
+            if not self._authed():
+                return self._send_json(401, {'error': 'unauthorized'})
+            return self._api_get(path, parse_qs(parsed.query))
+        return self._serve_static(path)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not path.startswith('/api/'):
+            return self._send_json(404, {'error': 'not found'})
+        if not self._authed():
+            return self._send_json(401, {'error': 'unauthorized'})
+        return self._api_post(path)
+
+    def _api_get(self, path, query):
+        if path == '/api/state':
+            try:
+                with open(Config.state_file, encoding='utf-8') as f:
+                    data = f.read()
+            except OSError:
+                data = json.dumps({'generated_at': None, 'services': {}})
+            body = data.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/api/logs':
+            tail = 200
+            if 'tail' in query:
+                try:
+                    tail = max(1, min(2000, int(query['tail'][0])))
+                except ValueError:
+                    pass
+            return self._send_json(200, {'logs': self._read_logs(tail)})
+
+        m = re.match(r'^/api/compose/([^/]+)$', path)
+        if m:
+            return self._get_compose(m.group(1))
+
+        return self._send_json(404, {'error': 'not found'})
+
+    def _get_compose(self, name):
+        if not NAME_RE.match(name):
+            return self._send_json(400, {'error': 'bad name'})
+        try:
+            with open(Config.state_file) as f:
+                state = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return self._send_json(500, {'error': 'state unreadable'})
+        svc = state.get('services', {}).get(name)
+        if not svc or not svc.get('compose_file'):
+            return self._send_json(404, {'error': 'unknown service'})
+        try:
+            with open(svc['compose_file']) as f:
+                content = f.read()
+        except OSError as e:
+            return self._send_json(500, {'error': str(e)})
+        return self._send_json(200, {'name': name, 'compose_file': svc['compose_file'], 'content': content})
+
+    def _api_post(self, path):
+        m = re.match(r'^/api/services/([^/]+)/(start|stop|restart)$', path)
+        if m:
+            name, action = m.group(1), m.group(2)
+            if not NAME_RE.match(name) or action not in ACTIONS:
+                return self._send_json(400, {'error': 'bad request'})
+            if not self._service_exists(name):
+                return self._send_json(404, {'error': 'unknown service'})
+            spawn_monitor([action, name])
+            return self._send_json(202, {'ok': True, 'queued': True})
+
+        if path == '/api/restart-all':
+            spawn_monitor(['restart-all'])
+            return self._send_json(202, {'ok': True, 'queued': True})
+
+        if path == '/api/rescan':
+            spawn_monitor(['discover'])
+            return self._send_json(202, {'ok': True, 'queued': True})
+
+        if path == '/api/full-scan':
+            spawn_monitor(['full-scan'])
+            return self._send_json(202, {'ok': True, 'queued': True})
+
+        m = re.match(r'^/api/compose/([^/]+)/validate$', path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name):
+                return self._send_json(400, {'error': 'bad name'})
+            body = self._read_json_body()
+            if body is None:
+                return self._send_json(400, {'error': 'bad json'})
+            return self._validate_compose(body.get('content', ''))
+
+        m = re.match(r'^/api/compose/([^/]+)$', path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name):
+                return self._send_json(400, {'error': 'bad name'})
+            if not self._service_exists(name):
+                return self._send_json(404, {'error': 'unknown service'})
+            body = self._read_json_body()
+            if body is None:
+                return self._send_json(400, {'error': 'bad json'})
+            content = body.get('content', '')
+            apply_ = bool(body.get('apply', False))
+            return self._save_compose(name, content, apply_)
+
+        return self._send_json(404, {'error': 'not found'})
+
+    def _validate_compose(self, content):
+        fd, tmp = tempfile.mkstemp(suffix='.yaml', dir=os.path.dirname(Config.state_file))
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            try:
+                r = run_monitor(['validate', tmp], timeout=20)
+            except subprocess.TimeoutExpired:
+                return self._send_json(504, {'ok': False, 'message': 'validation timed out'})
+            ok = r.returncode == 0
+            return self._send_json(200, {'ok': ok, 'message': (r.stdout + r.stderr).strip()})
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def _save_compose(self, name, content, apply_):
+        fd, tmp = tempfile.mkstemp(suffix='.yaml', dir=os.path.dirname(Config.state_file))
+        try:
+            with os.fdopen(fd, 'w') as f:
+                f.write(content)
+            args = ['save-compose', name, tmp]
+            if apply_:
+                args.append('--apply')
+            try:
+                r = run_monitor(args, timeout=20)
+            except subprocess.TimeoutExpired:
+                return self._send_json(504, {'ok': False, 'message': 'save timed out'})
+            ok = r.returncode == 0
+            return self._send_json(200, {'ok': ok, 'message': (r.stdout + r.stderr).strip(), 'applied': apply_ and ok})
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    def _serve_static(self, path):
+        if path == '/':
+            path = '/index.html'
+        safe_path = os.path.normpath(path).lstrip('/')
+        full = os.path.join(Config.web_dir, safe_path)
+        web_root = os.path.abspath(Config.web_dir)
+        if not os.path.abspath(full).startswith(web_root + os.sep) and os.path.abspath(full) != web_root:
+            return self._send_json(403, {'error': 'forbidden'})
+        if not os.path.isfile(full):
+            return self._send_json(404, {'error': 'not found'})
+        ctype, _ = mimetypes.guess_type(full)
+        return self._send_file(full, ctype or 'application/octet-stream')
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--root', required=True, help='repo root (unused directly, kept for context)')
+    ap.add_argument('--monitor-dir', required=True)
+    ap.add_argument('--port', type=int, default=8080)
+    ap.add_argument('--bind', default='0.0.0.0')
+    args = ap.parse_args()
+
+    Config.monitor_sh = os.path.join(args.monitor_dir, 'monitor.sh')
+    Config.state_file = os.path.join(args.monitor_dir, 'state', 'state.json')
+    Config.log_file = os.path.join(args.monitor_dir, 'state', 'events.log')
+    Config.token_file = os.path.join(args.monitor_dir, 'state', 'token')
+    Config.web_dir = os.path.join(args.monitor_dir, 'web')
+
+    with open(Config.token_file) as f:
+        Config.token = f.read().strip()
+
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    print(f'monitor backend listening on {args.bind}:{args.port}', file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == '__main__':
+    main()
