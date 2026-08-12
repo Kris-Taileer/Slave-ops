@@ -1,28 +1,28 @@
-# firegex-setup.sh — развёртывание Firegex на vulnbox
+# firegex-setup.sh — deploying Firegex on a vulnbox
 
-Обёртка над [Pwnzer0tt1/firegex](https://github.com/Pwnzer0tt1/firegex) — файрволом для
-Attack-Defense CTF. Скрипт делает всё, что обычно делаешь руками в первые минуты игры:
-ставит зависимости, поднимает docker, клонирует репу, запускает сервис и отдаёт тебе
-адрес веб-морды с паролем.
+A wrapper around [Pwnzer0tt1/firegex](https://github.com/Pwnzer0tt1/firegex), a firewall for
+Attack-Defense CTFs. The script does everything you would otherwise do by hand in the first
+minutes of a game: installs dependencies, brings up docker, clones the repo, starts the
+service, and hands you the web UI address together with the password.
 
 ---
 
-## Что нужно
+## Requirements
 
-| Требование | Комментарий |
+| Requirement | Notes |
 |---|---|
-| Linux | обязательно: Firegex работает через nftables/NFQUEUE, на macOS/WSL1 не заведётся |
-| root | нужен для nftables и для установки пакетов |
-| сеть | для `git clone` и docker-образа; на закрытом vulnbox см. [Оффлайн](#оффлайн-и-закрытые-vulnbox) |
+| Linux | mandatory: Firegex works through nftables/NFQUEUE, it will not run on macOS or WSL1 |
+| root | needed for nftables and for installing packages |
+| network | for `git clone` and the docker image; on an isolated vulnbox see [Offline](#offline-and-isolated-vulnboxes) |
 
-Docker, `git`, `curl`, `python3` скрипт ставит сам, если их нет. Пакетные менеджеры:
-apt, dnf, yum, pacman, apk, zypper.
+Docker, `git`, `curl` and `python3` are installed by the script if missing. Supported package
+managers: apt, dnf, yum, pacman, apk, zypper.
 
 ---
 
-## Быстрый старт
+## Quick start
 
-Скопировать скрипт на vulnbox и запустить:
+Copy the script to the vulnbox and run it:
 
 ```bash
 scp firegex-setup.sh root@<vulnbox>:/root/
@@ -32,26 +32,27 @@ scp firegex-setup.sh root@<vulnbox>:/root/
 sudo bash /root/firegex-setup.sh
 ```
 
-Через минуту-две в конце вывода появится:
+A minute or two later the tail of the output looks like this:
 
 ```
-[+] Firegex поднят
-    веб-морда : http://10.60.3.1:4444
-    пароль    : xK3nQ8vTpL2mWd9sZa
-    сохранено : /opt/firegex/.firegex-credentials
+[+] Firegex is up
+    web UI   : http://10.60.3.1:4444
+    password : xK3nQ8vTpL2mWd9sZa
+    saved to : /opt/firegex/.firegex-credentials
 ```
 
-Пароль также лежит в `/opt/firegex/.firegex-credentials` (режим 600) — если потерял вывод,
-читай оттуда.
+The password is also stored in `/opt/firegex/.firegex-credentials` (mode 600) — read it from
+there if you lost the output.
 
-**Сразу закрой доступ снаружи.** Открытая морда Firegex на 4444 — это подарок соперникам:
+**Close off outside access right away.** A Firegex UI open on 4444 is a gift to your
+opponents:
 
 ```bash
 sudo bash /root/firegex-setup.sh --allowed-ips 10.80.5.0/24
 ```
 
-где CIDR — сеть твоей команды. Альтернатива, если сеть непредсказуемая, — слушать только
-на localhost и ходить через SSH-туннель:
+where the CIDR is your team's network. If the network is unpredictable, the alternative is to
+bind to localhost only and reach it over an SSH tunnel:
 
 ```bash
 sudo bash /root/firegex-setup.sh --host 127.0.0.1
@@ -63,63 +64,63 @@ ssh -N -L 4444:127.0.0.1:4444 root@<vulnbox>
 
 ---
 
-## Действия
+## Actions
 
 ```bash
-sudo ./firegex-setup.sh [действие] [опции]
+sudo ./firegex-setup.sh [action] [options]
 ```
 
-| Действие | Что делает |
+| Action | What it does |
 |---|---|
-| `start` (по умолчанию) | зависимости → clone/pull → запуск, печатает URL и пароль |
-| `status` | состояние сервиса |
-| `logs` | логи Firegex (интерактивно, Ctrl-C для выхода) |
-| `restart` | перезапуск с текущим конфигом |
-| `stop` | остановить |
-| `update` | `git pull` + перезапуск |
-| `clean` | остановить и **удалить volume со всеми настройками** — спросит подтверждение |
+| `start` (default) | deps → clone/pull → start, prints the URL and password |
+| `status` | service state |
+| `logs` | Firegex logs (interactive, Ctrl-C to quit) |
+| `restart` | restart with the current config |
+| `stop` | stop the service |
+| `update` | `git pull` + restart |
+| `clean` | stop and **delete the volume with all settings** — asks for confirmation |
 
-`start` идемпотентен: повторный запуск на уже установленной машине просто обновит репу и
-перезапустит сервис. Но учти — с новым `--password` он поменяет пароль.
+`start` is idempotent: running it again on an already-installed machine just updates the repo
+and restarts the service. Note, though, that a new `--password` will change the password.
 
-## Опции
+## Options
 
-| Опция | По умолчанию | Зачем |
+| Option | Default | Purpose |
 |---|---|---|
-| `-p, --port N` | `4444` | порт веб-интерфейса |
-| `-w, --password PSW` | генерируется | пароль входа; без него скрипт сам сгенерит 20 символов |
-| `--host IP` | из конфига Firegex | на каком адресе слушать (`127.0.0.1` для туннеля) |
-| `--allowed-ips CIDR` | — | кому разрешён доступ к морде; **ставь это на игре** |
-| `--build` | — | собрать образ из исходников вместо готового (минуты вместо секунд) |
-| `--standalone` | — | режим без docker: rootless-окружение или докера нет |
-| `-d, --dir PATH` | `/opt/firegex` | куда ставить |
-| `--no-deps` | — | не трогать пакеты и docker, всё уже стоит |
-| `-h, --help` | — | справка |
+| `-p, --port N` | `4444` | web interface port |
+| `-w, --password PSW` | generated | login password; without it the script generates 20 characters |
+| `--host IP` | from Firegex config | address to bind to (`127.0.0.1` for a tunnel) |
+| `--allowed-ips CIDR` | — | who may reach the UI; **set this during a game** |
+| `--build` | — | build the image from source instead of pulling it (minutes instead of seconds) |
+| `--standalone` | — | no-docker mode: rootless environment, or docker unavailable |
+| `-d, --dir PATH` | `/opt/firegex` | install location |
+| `--no-deps` | — | leave packages and docker alone, everything is already installed |
+| `-h, --help` | — | help |
 
-Переменные окружения вместо флагов: `FIREGEX_PORT`, `FIREGEX_PASSWORD`, `FIREGEX_DIR`,
+Environment variables instead of flags: `FIREGEX_PORT`, `FIREGEX_PASSWORD`, `FIREGEX_DIR`,
 `FIREGEX_REPO`.
 
-### Примеры
+### Examples
 
-Свой пароль, свой порт, доступ только команде:
+Own password, own port, access limited to the team:
 
 ```bash
 sudo ./firegex-setup.sh -w 'CorrectHorseBattery' -p 8080 --allowed-ips 10.80.5.0/24
 ```
 
-Пароль из окружения, чтобы не светить его в history и в `ps`:
+Password from the environment, to keep it out of shell history and out of `ps`:
 
 ```bash
 sudo FIREGEX_PASSWORD='...' ./firegex-setup.sh
 ```
 
-Vulnbox без docker (или rootless-контейнер):
+Vulnbox without docker (or a rootless container):
 
 ```bash
 sudo ./firegex-setup.sh --standalone
 ```
 
-Обновиться до свежей версии посреди игры:
+Update to a fresh version mid-game:
 
 ```bash
 sudo ./firegex-setup.sh update
@@ -127,49 +128,51 @@ sudo ./firegex-setup.sh update
 
 ---
 
-## Что дальше делать в UI
+## What to do next in the UI
 
-Модули Firegex, в порядке полезности на игре:
+Firegex modules, in the order they tend to matter during a game:
 
-**Firewall Rules** — allow/deny поверх nftables, аналог ufw, но через веб-морду.
-Первым делом закрой всё, кроме портов сервисов игры и SSH. Дёшево и сразу режет
-сканеры и левые порты, оставленные организаторами.
+**Firewall Rules** — allow/deny on top of nftables, a ufw equivalent driven from the web UI.
+First thing to do: close everything except the game service ports and SSH. It is cheap and it
+immediately cuts off scanners and the stray ports the organizers left behind.
 
-**Netfilter Regex (nfregex)** — основной инструмент. Добавляешь сервис (порт, TCP/UDP,
-IPv4/IPv6), включаешь — трафик идёт через NFQUEUE, регексы (PCRE2) матчатся в C++-фильтре
-в ядре, совпадение = пакет дропается. Правила задаются в base64.
+**Netfilter Regex (nfregex)** — the main tool. You add a service (port, TCP/UDP, IPv4/IPv6)
+and enable it; traffic then goes through NFQUEUE, PCRE2 regexes are matched by a C++ filter in
+kernel space, and a match drops the packet. Rules are supplied base64-encoded.
 
-Практика, которая экономит нервы:
-- Пиши **blacklist на конкретную сигнатуру эксплойта** (payload, путь, магический
-  параметр), а не на «всё подозрительное». Широкий регекс уронит твой же чекер, а SLA
-  дороже, чем несколько украденных флагов.
-- Матчи на **входящий** трафик — по эксплойту, на **исходящий** — по формату флага
-  (`[A-Z0-9]{31}=` и т.п.). Второе спасает, когда эксплойт ты ещё не понял.
-- После каждого правила смотри счётчик блокировок и статус сервиса: если сервис
-  «покраснел» у чекера, выключай правило, не разбираясь.
+Practices that save you grief:
+- Blacklist a **specific exploit signature** (payload, path, magic parameter) rather than
+  "anything suspicious". A broad regex will take down your own checker, and SLA costs more
+  than a handful of stolen flags.
+- Match **inbound** traffic on the exploit and **outbound** traffic on the flag format
+  (`[A-Z0-9]{31}=` or whatever your game uses). The latter saves you while you still have no
+  idea what the exploit does.
+- After every rule, watch the block counter and the service status: if the checker turns the
+  service red, disable the rule first and investigate afterwards.
 
-**Hijack Port to Proxy** — перенаправляет порт сервиса на твой прокси на loopback.
-Нужен, когда регексов не хватает и надо разбирать протокол руками.
+**Hijack Port to Proxy** — redirects a service port to your own proxy on loopback. Useful once
+regexes are not enough and you have to parse the protocol yourself.
 
-**Netfilter Proxy (nfproxy)** — фильтры на Python поверх nfqueue, со встроенными
-парсерами протоколов (например HTTP). Пишешь фильтр, тестируешь его CLI-утилитой `fgex`,
-загружаешь. Это когда «дропнуть по регексу» уже не работает — нужна логика на состоянии
-или на разобранном запросе.
+**Netfilter Proxy (nfproxy)** — Python filters on top of nfqueue, with built-in protocol
+parsers (HTTP, for example). You write a filter, test it with the `fgex` CLI tool, then load
+it. This is for when "drop it by regex" no longer works and you need stateful logic or a
+parsed request.
 
-**TLS Decryption** — терминирует TLS, кладёт расшифрованный трафик на loopback для
-остальных фильтров, потом шифрует обратно. Нужен только если сервис под HTTPS.
+**TLS Decryption** — terminates TLS, exposes the decrypted traffic on loopback for the other
+filters, then re-encrypts it. Only needed when the service runs behind HTTPS.
 
-Кнопка **docs** внутри интерфейса открывает документацию по каждому модулю — там актуальный
-синтаксис правил.
+The **docs** button inside the interface opens per-module documentation with the current rule
+syntax.
 
 ---
 
-## Оффлайн и закрытые vulnbox
+## Offline and isolated vulnboxes
 
-Игровые vulnbox'ы часто отрезаны от интернета. Готовься заранее, не за пять минут до старта:
+Game vulnboxes are often cut off from the internet. Prepare in advance, not five minutes
+before the start:
 
-- Прогони скрипт на такой же машине дома, потом перенеси `/opt/firegex` целиком.
-- Образ выгрузи и залей руками:
+- Run the script on an identical machine at home, then move `/opt/firegex` over as a whole.
+- Export and import the image by hand:
 
 ```bash
 docker save ghcr.io/pwnzer0tt1/firegex:latest | gzip > firegex.tar.gz
@@ -179,55 +182,56 @@ docker save ghcr.io/pwnzer0tt1/firegex:latest | gzip > firegex.tar.gz
 gunzip -c firegex.tar.gz | docker load
 ```
 
-  после этого — `sudo ./firegex-setup.sh --no-deps`, скрипт не полезет в сеть за образом.
-- Если docker в принципе недоступен, `--standalone` собирает и гоняет Firegex напрямую
-  на Python, без контейнера.
+  after that run `sudo ./firegex-setup.sh --no-deps` and the script will not reach out to the
+  network for the image.
+- If docker is unavailable altogether, `--standalone` builds and runs Firegex directly on
+  Python, with no container.
 
 ---
 
-## Разбор проблем
+## Troubleshooting
 
-**`Firegex работает только на Linux`** — ты запустил скрипт на маке. Это не баг: NFQUEUE и
-nftables есть только в Linux. Копируй на vulnbox.
+**`Firegex only runs on Linux`** — you ran the script on a Mac. This is not a bug: NFQUEUE and
+nftables exist on Linux only. Copy it to the vulnbox.
 
-**`docker есть, но демон не отвечает`** —
+**`docker is installed but the daemon is not responding`** —
 
 ```bash
 sudo systemctl start docker
 ```
 
-и повтори. В контейнере/LXC без systemd docker может не подняться вовсе — бери
-`--standalone`.
+then retry. Inside a container or an LXC without systemd docker may not come up at all — use
+`--standalone` there.
 
-**`нет docker compose`** — поставь плагин руками (`docker-compose-plugin` в apt/dnf) или
-иди в `--standalone`.
+**`no docker compose`** — install the plugin by hand (`docker-compose-plugin` in apt/dnf) or
+switch to `--standalone`.
 
-**Регекс включён, а трафик не фильтруется** — проверь, что модули ядра загружены:
+**A regex is enabled but traffic is not filtered** — check that the kernel modules are loaded:
 
 ```bash
 lsmod | grep -E 'nfnetlink_queue|nft_queue'
 ```
 
-Скрипт делает `modprobe` при установке, но после перезагрузки vulnbox их может не быть.
-На кастомных/урезанных ядрах NFQUEUE иногда просто не собран — тогда остаются Firewall
-Rules и port hijack.
+The script runs `modprobe` at install time, but after a vulnbox reboot they may be gone. On
+custom or stripped-down kernels NFQUEUE is sometimes not compiled in at all — then Firewall
+Rules and port hijack are what you are left with.
 
-**Сервис упал после включения фильтра** — сначала выключи фильтр в UI, потом разбирайся.
-Если морда недоступна, останови всё целиком:
+**The service went down after you enabled a filter** — disable the filter in the UI first,
+investigate second. If the UI is unreachable, stop everything:
 
 ```bash
 sudo ./firegex-setup.sh stop
 ```
 
-Правила nftables снимаются вместе с сервисом, трафик пойдёт напрямую.
+The nftables rules are removed along with the service and traffic flows directly again.
 
-**Забыл пароль** —
+**Forgot the password** —
 
 ```bash
 sudo cat /opt/firegex/.firegex-credentials
 ```
 
-Поменять без переустановки:
+Change it without reinstalling:
 
 ```bash
 cd /opt/firegex && sudo python3 run.py config --password
@@ -235,11 +239,12 @@ cd /opt/firegex && sudo python3 run.py config --password
 
 ---
 
-## Чеклист на старте игры
+## Game-start checklist
 
-1. `sudo ./firegex-setup.sh --allowed-ips <сеть команды>` — до того, как поднимут сеть.
-2. Проверить, что морда открывается и логин по паролю проходит.
-3. Firewall Rules: закрыть всё лишнее, оставить порты сервисов и SSH.
-4. Завести в nfregex по сервису на каждый игровой порт — **выключенными**, чтобы включать
-   в один клик, когда прилетит первый эксплойт.
-5. Пароль и URL положить в командный чат — админить будет не только ты.
+1. `sudo ./firegex-setup.sh --allowed-ips <team network>` — before the network goes live.
+2. Verify the UI opens and the password login works.
+3. Firewall Rules: close everything unnecessary, keep the service ports and SSH.
+4. Create an nfregex entry for every game port, **left disabled**, so you can enable one with
+   a single click when the first exploit lands.
+5. Put the password and the URL in the team chat — you will not be the only one administering
+   this.
