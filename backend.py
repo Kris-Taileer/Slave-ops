@@ -23,7 +23,10 @@ UTIL_SCRIPTS = {
     'farm': {
         'dir': 'Farm',
         'cmd': lambda action: ['./farm', action],
-        'actions': {'up', 'down', 'restart', 'status'},
+        # 'init' is registered so the endpoint mirrors farm's real subcommands, but it's a
+        # TUI wizard (scripts/configure.py hard-requires a tty) — the web UI never calls it
+        # over the API, it just tells the operator to run it manually.
+        'actions': {'init', 'down', 'restart', 'status'},
     },
     'firegex': {
         'dir': 'firegex',
