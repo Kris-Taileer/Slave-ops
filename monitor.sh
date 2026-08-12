@@ -118,6 +118,12 @@ state_init() {
 init_all() {
   state_init
   mkdir -p "$WEB_DIR"
+  local asset
+  for asset in index.html script style; do
+    if [ ! -e "$WEB_DIR/$asset" ] && [ ! -L "$WEB_DIR/$asset" ] && [ -e "$SCRIPT_DIR/$asset" ]; then
+      ln -s "$SCRIPT_DIR/$asset" "$WEB_DIR/$asset"
+    fi
+  done
   if [ ! -f "$TOKEN_FILE" ]; then
     ( umask 077; head -c 24 /dev/urandom | base64 | tr -d '=+/\n' > "$TOKEN_FILE" )
     log info monitor "generated new access token"

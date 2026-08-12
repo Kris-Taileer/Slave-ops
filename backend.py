@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import hmac
 import json
 import mimetypes
@@ -8,17 +9,36 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 ACTIONS = {'start', 'stop', 'restart'}
 
+# Utility scripts that live in their own directory next to monitor.sh,
+# outside the docker-compose service discovery monitor.sh does.
+UTIL_SCRIPTS = {
+    'farm': {
+        'dir': 'Farm',
+        'cmd': lambda action: ['./farm', action],
+        'actions': {'up', 'down', 'restart', 'status'},
+    },
+    'firegex': {
+        'dir': 'firegex',
+        'cmd': lambda action: ['bash', 'firegex-setup.sh', action],
+        'actions': {'start', 'stop', 'restart', 'status'},
+    },
+}
+
 
 class Config:
     monitor_sh = None
+    monitor_dir = None
     state_file = None
     log_file = None
+    log_lock = None
     token_file = None
     web_dir = None
     token = None
@@ -37,6 +57,41 @@ def spawn_monitor(args):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+
+
+def log_event(level, service, msg):
+    msg = msg.replace('\n', ' ').replace('\t', ' ')
+    ts = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    ts = ts[:-2] + ':' + ts[-2:] if ts[-5] in '+-' else ts
+    line = '%s\t%s\t%s\t%s\n' % (ts, level, service, msg)
+    with open(Config.log_lock, 'a') as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            with open(Config.log_file, 'a', encoding='utf-8') as f:
+                f.write(line)
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+
+
+def spawn_util(name, action):
+    info = UTIL_SCRIPTS[name]
+    cwd = os.path.join(Config.monitor_dir, info['dir'])
+    cmd = info['cmd'](action)
+    log_event('info', name, '%s requested via web UI' % action)
+
+    def runner():
+        try:
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=1800)
+            output = (r.stdout + r.stderr).strip().splitlines()
+            summary = output[-1] if output else ''
+            level = 'success' if r.returncode == 0 else 'error'
+            log_event(level, name, '%s finished (exit %d): %s' % (action, r.returncode, summary))
+        except subprocess.TimeoutExpired:
+            log_event('error', name, '%s timed out' % action)
+        except OSError as e:
+            log_event('error', name, '%s failed to start: %s' % (action, e))
+
+    threading.Thread(target=runner, daemon=True).start()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -179,6 +234,15 @@ class Handler(BaseHTTPRequestHandler):
             spawn_monitor([action, name])
             return self._send_json(202, {'ok': True, 'queued': True})
 
+        m = re.match(r'^/api/utils/([^/]+)/([^/]+)$', path)
+        if m:
+            name, action = m.group(1), m.group(2)
+            info = UTIL_SCRIPTS.get(name)
+            if not info or action not in info['actions']:
+                return self._send_json(400, {'error': 'bad request'})
+            spawn_util(name, action)
+            return self._send_json(202, {'ok': True, 'queued': True})
+
         if path == '/api/restart-all':
             spawn_monitor(['restart-all'])
             return self._send_json(202, {'ok': True, 'queued': True})
@@ -277,8 +341,10 @@ def main():
     args = ap.parse_args()
 
     Config.monitor_sh = os.path.join(args.monitor_dir, 'monitor.sh')
+    Config.monitor_dir = args.monitor_dir
     Config.state_file = os.path.join(args.monitor_dir, 'state', 'state.json')
     Config.log_file = os.path.join(args.monitor_dir, 'state', 'events.log')
+    Config.log_lock = os.path.join(args.monitor_dir, 'state', 'events.log.lock')
     Config.token_file = os.path.join(args.monitor_dir, 'state', 'token')
     Config.web_dir = os.path.join(args.monitor_dir, 'web')
 
