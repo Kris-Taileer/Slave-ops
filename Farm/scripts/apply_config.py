@@ -103,6 +103,21 @@ def env_value(env, key, default):
     return env.get(key) or str(default)
 
 
+def apply_runtime_secrets(cfg, runtime_env=None):
+    if runtime_env is None:
+        runtime_env = load_env(ROOT / "runtime/secrets.env")
+    checksystem = need_map(cfg, "checksystem")
+    mapping = {
+        "CHECKSYSTEM_TOKEN": "token",
+        "CHECKSYSTEM_TEAM_TOKEN": "team_token",
+    }
+    for env_key, cfg_key in mapping.items():
+        value = runtime_env.get(env_key)
+        if value not in (None, ""):
+            checksystem[cfg_key] = value
+    return cfg
+
+
 def write_file(path, text, mode=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -141,7 +156,7 @@ def render_s4d_config(cfg):
         "CONFIG = {",
         "    'DEBUG': os.getenv('DEBUG') == '1',",
         f"    'TEAMS': {py_value(dict(teams))},",
-        f"    'FLAG_FORMAT': {py_value(str(flags.get('format', r'FLAG\\{[A-Za-z0-9_]+\\}')))},",
+        f"    'FLAG_FORMAT': {py_value(str(flags.get('format', r'[A-Z0-9]{31}=')))},",
         "",
         f"    'SYSTEM_PROTOCOL': {py_value(protocol)},",
     ]
@@ -150,8 +165,6 @@ def render_s4d_config(cfg):
         "host": "SYSTEM_HOST",
         "port": "SYSTEM_PORT",
         "url": "SYSTEM_URL",
-        "token": "SYSTEM_TOKEN",
-        "team_token": "TEAM_TOKEN",
         "validator": "SYSTEM_VALIDATOR",
         "server_key": "SYSTEM_SERVER_KEY",
     }
@@ -159,6 +172,13 @@ def render_s4d_config(cfg):
         value = checksystem.get(cfg_key)
         if value not in (None, ""):
             lines.append(f"    {py_value(farm_key)}: {py_value(value)},")
+
+    lines.extend(
+        [
+            "    'SYSTEM_TOKEN': os.getenv('CHECKSYSTEM_TOKEN') or '',",
+            "    'TEAM_TOKEN': os.getenv('CHECKSYSTEM_TEAM_TOKEN') or '',",
+        ]
+    )
 
     extra = checksystem.get("extra", {})
     if extra:
@@ -302,6 +322,8 @@ def write_env(cfg):
         "HTTPS_NEO_WEBUI_PORT": get_path(cfg, "ports.https_neo_webui", 8443),
         "VICTORIA_PORT": get_path(cfg, "ports.victoria", 8428),
         "NEO_WORKER_JOBS": get_path(cfg, "neo.worker_jobs", 20),
+        "CHECKSYSTEM_TOKEN": get_path(cfg, "checksystem.token", ""),
+        "CHECKSYSTEM_TEAM_TOKEN": get_path(cfg, "checksystem.team_token", ""),
         "SERVER_PASSWORD": server_password,
         "FARM_PASSWORD": server_password,
         "EXTERNAL_REDIS_PASSWORD": env_value(old, "EXTERNAL_REDIS_PASSWORD", token_hex(24)),
@@ -366,6 +388,7 @@ def main():
     if not cfg_path.is_absolute():
         cfg_path = ROOT / cfg_path
     cfg = parse_simple_yaml(cfg_path)
+    apply_runtime_secrets(cfg)
     ensure_tls_certificate(cfg)
     env = write_env(cfg)
 
