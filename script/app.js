@@ -180,7 +180,7 @@ const utils = [
   {
     key: 'farm', name: 'Ферма', status: 'up', port: '31337', creds: 'token : team_secret_xx', extra: 'teams 1-16 · HTTP',
     actions: [
-      { action: 'up', label: 'Up', cls: 'btn-success' },
+      { action: 'init', label: 'Init', cls: 'btn-success' },
       { action: 'restart', label: 'Restart', cls: 'btn-secondary' },
       { action: 'down', label: 'Down', cls: 'btn-danger' },
       { action: 'status', label: 'Status', cls: 'btn-ghost' }
@@ -587,6 +587,12 @@ function restartUtil(name) {
 }
 
 function utilAction(key, action, label) {
+  if (key === 'farm' && action === 'init') {
+    toast('warn', 'Init — интерактивный мастер, из веба не запускается');
+    addLog('warn', 'Ферма: init — TUI, требует реального терминала. Запусти вручную: cd Farm && ./farm init (после проверки сервисов, до старта фарма)');
+    return;
+  }
+
   addLog('info', `${label}: ${action} requested`);
   apiPost(`/api/utils/${key}/${action}`)
     .then(() => {
