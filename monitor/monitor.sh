@@ -20,7 +20,6 @@ BACKUP_DIR="$STATE_DIR/backups"
 HEALTH_INTERVAL="${MONITOR_INTERVAL:-60}"
 
 SCAN_TIMEOUT="${MONITOR_SCAN_TIMEOUT:-180}"
-FULL_SCAN_INTERVAL="${MONITOR_FULL_SCAN_INTERVAL:-10}"
 
 SCAN_EXCLUDE_DEFAULT=(
   /proc /sys /dev /run
@@ -217,34 +216,45 @@ register_service_dir() {
 
 discover() {
   state_init
-  if [ ! -d "$SERVICES_DIR" ]; then
-    log warn monitor "services directory does not exist: $SERVICES_DIR (check MONITOR_SERVICES_DIR / monitor.conf)"
-    with_state_lock jq_update '.generated_at = $t' --arg t "$(date -Iseconds)"
-    return 0
-  fi
-  local found=0
+  local found_root=0 found_services=0
   local dir name
   shopt -s nullglob
-  for dir in "$SERVICES_DIR"/*/; do
+
+  for dir in "$REPO_ROOT"/*/; do
     [ -d "$dir" ] || continue
     dir="${dir%/}"
+    [ "$dir" = "$SCRIPT_DIR" ] && continue
+    [ "$dir" = "$SERVICES_DIR" ] && continue
+    find_compose_file "$dir" >/dev/null 2>&1 || continue
     name="$(basename "$dir")"
-    found=$((found + 1))
-    register_service_dir "$name" "$dir" "services_dir" || true
+    found_root=$((found_root + 1))
+    register_service_dir "$name" "$dir" "root_dir" || true
   done
 
-  local existing svc
-  existing="$(jq -r '.services | to_entries[] | select(.value.source=="services_dir") | .key' "$STATE_FILE" 2>/dev/null)"
-  while IFS= read -r svc; do
+  if [ -d "$SERVICES_DIR" ]; then
+    for dir in "$SERVICES_DIR"/*/; do
+      [ -d "$dir" ] || continue
+      dir="${dir%/}"
+      name="$(basename "$dir")"
+      found_services=$((found_services + 1))
+      register_service_dir "$name" "$dir" "services_dir" || true
+    done
+  else
+    log warn monitor "services directory does not exist: $SERVICES_DIR (check MONITOR_SERVICES_DIR / monitor.conf)"
+  fi
+
+  local existing svc path
+  existing="$(jq -r '.services | to_entries[] | select(.value.source=="root_dir" or .value.source=="services_dir") | "\(.key)\t\(.value.path)"' "$STATE_FILE" 2>/dev/null)"
+  while IFS=$'\t' read -r svc path; do
     [ -z "$svc" ] && continue
-    if [ ! -d "$SERVICES_DIR/$svc" ]; then
+    if [ ! -d "$path" ]; then
       with_state_lock jq_update 'del(.services[$n])' --arg n "$svc"
       log warn "$svc" "service directory removed, dropped from registry"
     fi
   done <<< "$existing"
 
   with_state_lock jq_update '.generated_at = $t' --arg t "$(date -Iseconds)"
-  log info monitor "local discovery complete: found=$found"
+  log info monitor "local discovery complete: nearby=$found_root services_dir=$found_services"
 }
 
 full_scan() {
@@ -501,14 +511,9 @@ watch_loop() {
     log warn monitor "watch loop already running elsewhere (lock held), exiting this instance"
     return 0
   fi
-  log info monitor "watch loop started (pid $$, interval ${HEALTH_INTERVAL}s, full-scan every ${FULL_SCAN_INTERVAL} cycles)"
-  local cycle=0
+  log info monitor "watch loop started (pid $$, interval ${HEALTH_INTERVAL}s)"
   while true; do
     discover || log error monitor "discover cycle failed"
-    cycle=$((cycle + 1))
-    if [ "$FULL_SCAN_INTERVAL" -gt 0 ] && [ $((cycle % FULL_SCAN_INTERVAL)) -eq 0 ]; then
-      full_scan || log error monitor "full scan cycle failed"
-    fi
     local names n
     names="$(jq -r '.services | keys[]' "$STATE_FILE" 2>/dev/null)"
     while IFS= read -r n; do
@@ -525,9 +530,11 @@ Usage: $(basename "$0") <command> [args]
 
 Commands:
   up                        Discover services, start watch loop + web board (default)
-  discover                  Rescan services/ once (fast, local only), update registry
-  full-scan                 Whole-machine sweep for compose files outside services/
-                             too (slow — see MONITOR_SCAN_TIMEOUT / MONITOR_SCAN_EXCLUDE)
+  discover                  Rescan the repo root and services/ once (fast, local only)
+  full-scan                 On-demand whole-machine sweep for compose files anywhere
+                             else on disk (slow — see MONITOR_SCAN_TIMEOUT / MONITOR_SCAN_EXCLUDE).
+                             Never runs automatically — CLI only, or the board's
+                             Full scan button.
   status                    Print current state.json
   start <name>              docker compose up -d for a service
   stop <name>               docker compose down for a service
@@ -544,7 +551,6 @@ Env / monitor.conf overrides:
   MONITOR_SERVICES_DIR, SERVICES_DIR   services/ location (see top of script)
   MONITOR_SCAN_TIMEOUT (default 180)   full-disk scan timeout, seconds
   MONITOR_SCAN_EXCLUDE                 extra colon-separated paths to prune
-  MONITOR_FULL_SCAN_INTERVAL (def 10)  full-scan every N watch-loop cycles (0=off)
 EOF
 }
 
@@ -587,8 +593,6 @@ main() {
       ;;
     up)
       discover
-      full_scan &
-      FULLSCAN_PID=$!
       watch_loop &
       WATCH_PID=$!
       python3 "$SCRIPT_DIR/backend.py" --root "$REPO_ROOT" --monitor-dir "$SCRIPT_DIR" --port "${MONITOR_PORT:-8080}" --bind "${MONITOR_BIND:-0.0.0.0}" &
@@ -598,9 +602,9 @@ main() {
         [ "$SHUTTING_DOWN" = 1 ] && return
         SHUTTING_DOWN=1
         log info monitor "shutting down"
-        kill -TERM "$WATCH_PID" "$BACKEND_PID" "$FULLSCAN_PID" 2>/dev/null
+        kill -TERM "$WATCH_PID" "$BACKEND_PID" 2>/dev/null
         sleep 0.3
-        kill -KILL "$WATCH_PID" "$BACKEND_PID" "$FULLSCAN_PID" 2>/dev/null
+        kill -KILL "$WATCH_PID" "$BACKEND_PID" 2>/dev/null
         wait 2>/dev/null
       }
       trap shutdown_handler EXIT INT TERM
