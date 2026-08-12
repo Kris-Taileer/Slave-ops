@@ -1,0 +1,38 @@
+spring:
+  datasource:
+    url: "jdbc:postgresql://localhost:5432/packmate"
+    username: "packmate"
+    password: "123456"
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 20
+        order_inserts: true
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+server:
+  compression:
+    enabled: true
+    min-response-size: 1KB
+
+packmate:
+  capture-mode: LIVE  # LIVE, FILE, VIEW
+  interface-name: enp0s31f6
+  pcap-file: file.pcap
+  local-ip: "192.168.0.125"
+  web:
+    account-login: BinaryBears
+    account-password: 123456
+  timeout:
+    udp-stream-timeout: 20 # seconds
+    tcp-stream-timeout: 40 # seconds
+    check-interval: 10 # seconds
+  cleanup:
+    enabled: true
+    threshold: 240 # minutes
+    interval: 5 # minutes
+  ignore-empty-packets: true

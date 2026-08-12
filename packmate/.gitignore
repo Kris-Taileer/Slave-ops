@@ -1,0 +1,5 @@
+.env
+.packmate-credentials
+data/
+*.pyc
+__pycache__/

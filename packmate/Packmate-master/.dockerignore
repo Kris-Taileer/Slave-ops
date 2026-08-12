@@ -1,0 +1,8 @@
+build
+out
+screenshots
+.*
+docker-compose.yml
+Dockerfile_*
+data
+README*

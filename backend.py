@@ -33,6 +33,15 @@ UTIL_SCRIPTS = {
         'cmd': lambda action: ['bash', 'firegex-setup.sh', action],
         'actions': {'start', 'stop', 'restart', 'status'},
     },
+    'packmate': {
+        'dir': 'packmate',
+        'cmd': lambda action: ['bash', 'packmate-setup.sh', action],
+        # 'configure' is registered so the endpoint mirrors packmate-setup.sh's real
+        # subcommands, but it's a TUI wizard (packmate-configure.py hard-requires a tty) —
+        # the web UI never calls it over the API, it just tells the operator to run it
+        # manually, same as farm's 'init'.
+        'actions': {'start', 'stop', 'restart', 'status', 'configure'},
+    },
 }
 
 

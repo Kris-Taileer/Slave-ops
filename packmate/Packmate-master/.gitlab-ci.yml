@@ -1,0 +1,24 @@
+docker-build:
+  image: docker:latest
+  stage: build
+  variables:
+    GIT_SUBMODULE_STRATEGY: normal
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - touch .env
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH" ]]; then # master
+        export BUILD_TAG=latest
+        echo "Running on default branch '$CI_DEFAULT_BRANCH'"
+      else # tag
+        export BUILD_TAG="$CI_COMMIT_TAG"
+        echo "Running on tag = $BUILD_TAG"
+      fi
+    - docker compose build
+    - docker compose push
+  only:
+    - master
+    - tags
