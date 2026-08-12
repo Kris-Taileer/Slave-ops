@@ -22,6 +22,8 @@ core_services=(
 usage() {
   cat <<'EOF'
 Usage:
+  ./farm init              interactive first-time configuration
+  ./farm configure         edit configuration in terminal
   ./farm apply             generate configs from attdef.yml
   ./farm up                apply config, build images, start farm + neo
   ./farm down              stop containers
@@ -154,6 +156,10 @@ cmd="${1:-help}"
 shift || true
 
 case "${cmd}" in
+  init|configure)
+    python3 scripts/configure.py
+    python3 scripts/apply_config.py attdef.yml
+    ;;
   apply)
     python3 scripts/apply_config.py attdef.yml
     ;;

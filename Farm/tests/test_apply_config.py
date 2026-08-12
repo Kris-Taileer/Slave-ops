@@ -36,5 +36,43 @@ class NeoClientFarmURLTests(unittest.TestCase):
         )
 
 
+class RuntimeSecretsTests(unittest.TestCase):
+    def test_runtime_tokens_override_public_config(self):
+        cfg = {
+            "checksystem": {"token": "public", "team_token": "public-team"}
+        }
+
+        APPLY_CONFIG.apply_runtime_secrets(
+            cfg,
+            {
+                "CHECKSYSTEM_TOKEN": "secret",
+                "CHECKSYSTEM_TEAM_TOKEN": "secret-team",
+            },
+        )
+
+        self.assertEqual(cfg["checksystem"]["token"], "secret")
+        self.assertEqual(cfg["checksystem"]["team_token"], "secret-team")
+
+    def test_rendered_config_does_not_contain_tokens(self):
+        cfg = {
+            "server": {},
+            "teams": {"Team #1": "127.0.0.1"},
+            "flags": {},
+            "submitter": {},
+            "checksystem": {
+                "protocol": "ctfcup_tcp",
+                "token": "must-not-be-rendered",
+                "team_token": "also-secret",
+            },
+        }
+
+        rendered = APPLY_CONFIG.render_s4d_config(cfg)
+
+        self.assertNotIn("must-not-be-rendered", rendered)
+        self.assertNotIn("also-secret", rendered)
+        self.assertIn("os.getenv('CHECKSYSTEM_TOKEN')", rendered)
+        self.assertIn("os.getenv('CHECKSYSTEM_TEAM_TOKEN')", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

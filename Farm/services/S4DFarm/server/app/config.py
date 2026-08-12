@@ -5,12 +5,14 @@ import os
 
 CONFIG = {
     'DEBUG': os.getenv('DEBUG') == '1',
-    'TEAMS': {'Team #1': '127.0.0.1'},
-    'FLAG_FORMAT': 'FLAG\\{[A-Za-z0-9_]+\\}',
+    'TEAMS': {'Team #1': '10.10.10.1', 'Team #2': '10.10.10.2'},
+    'FLAG_FORMAT': '[A-Z0-9]{31}=',
 
     'SYSTEM_PROTOCOL': 'ctfcup_tcp',
     'SYSTEM_HOST': '5.129.237.176',
     'SYSTEM_PORT': 31337,
+    'SYSTEM_TOKEN': os.getenv('CHECKSYSTEM_TOKEN') or '',
+    'TEAM_TOKEN': os.getenv('CHECKSYSTEM_TEAM_TOKEN') or '',
 
     'SUBMIT_FLAG_LIMIT': 100,
     'SUBMIT_PERIOD': 2,

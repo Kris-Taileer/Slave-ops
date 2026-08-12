@@ -9,6 +9,8 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       POSTGRES_DSN: "host=postgres port=5432 user=farm password=farm dbname=farm"
       SERVER_PASSWORD: ${SERVER_PASSWORD}
+      CHECKSYSTEM_TOKEN: ${CHECKSYSTEM_TOKEN:-}
+      CHECKSYSTEM_TEAM_TOKEN: ${CHECKSYSTEM_TEAM_TOKEN:-}
       DEBUG: ${DEBUG:-0}
     depends_on:
       s4d-postgres:
@@ -38,6 +40,8 @@ services:
       CELERY_BROKER_URL: "redis://redis:6379/1"
       POSTGRES_DSN: "host=postgres port=5432 user=farm password=farm dbname=farm"
       FARM_DATA: /data
+      CHECKSYSTEM_TOKEN: ${CHECKSYSTEM_TOKEN:-}
+      CHECKSYSTEM_TEAM_TOKEN: ${CHECKSYSTEM_TEAM_TOKEN:-}
     depends_on:
       s4d-postgres:
         condition: service_healthy
