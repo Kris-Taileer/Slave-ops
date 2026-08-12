@@ -21,6 +21,7 @@ const services = [
     status: 'up',
     ports: '80, 443',
     containers: 'nginx + app',
+    vulns: [],
     compose: `version: "3.8"
 services:
   web:
@@ -48,6 +49,7 @@ networks:
     status: 'up',
     ports: '8080',
     containers: 'api + redis',
+    vulns: [],
     compose: `version: "3.8"
 services:
   api:
@@ -75,6 +77,7 @@ networks:
     status: 'warn',
     ports: '5432',
     containers: 'postgres',
+    vulns: [],
     compose: `version: "3.8"
 services:
   db:
@@ -102,6 +105,7 @@ networks:
     status: 'down',
     ports: '9000',
     containers: 'checker',
+    vulns: [],
     compose: `version: "3.8"
 services:
   checker:
@@ -122,6 +126,7 @@ networks:
     status: 'up',
     ports: '—',
     containers: 'sploit',
+    vulns: [],
     compose: `version: "3.8"
 services:
   sploit:
@@ -165,6 +170,32 @@ let logs = [
   { time: '11:30:15', level: 'info', msg: 'Ping cycle completed' }
 ];
 
+const vulnDatabase = {
+  web: [
+    { severity: 'high', title: 'Default credentials: admin / admin' },
+    { severity: 'medium', title: 'Directory listing enabled on /uploads' },
+    { severity: 'low', title: 'Server version disclosed in headers' }
+  ],
+  api: [
+    { severity: 'high', title: 'Unauthenticated /admin endpoint' },
+    { severity: 'high', title: 'JWT secret is "secret"' },
+    { severity: 'medium', title: 'CORS allows *' }
+  ],
+  db: [
+    { severity: 'high', title: 'PostgreSQL default password "postgres"' },
+    { severity: 'medium', title: 'Port 5432 exposed externally' },
+    { severity: 'low', title: 'No SSL on database connection' }
+  ],
+  checker: [
+    { severity: 'high', title: 'Hardcoded flag in source' },
+    { severity: 'medium', title: 'Debug mode enabled' }
+  ],
+  sploit: [
+    { severity: 'medium', title: 'Team token visible in env' },
+    { severity: 'low', title: 'No rate limiting on farm submit' }
+  ]
+};
+
 let currentTab = 'services';
 let currentComposeId = null;
 let editor = null;
@@ -207,10 +238,16 @@ function renderServices(filter = '') {
     return;
   }
 
-  grid.innerHTML = filtered.map(s => `
+  grid.innerHTML = filtered.map(s => {
+    const vulnCount = s.vulns ? s.vulns.length : 0;
+    const vulnBadge = vulnCount > 0
+      ? `<span style="background:rgba(239,68,68,0.15);color:#ef4444;font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;margin-left:8px">${vulnCount} vuln</span>`
+      : '';
+
+    return `
     <div class="card">
       <div class="card-header">
-        <div class="card-title">${escapeHtml(s.name)}</div>
+        <div class="card-title">${escapeHtml(s.name)}${vulnBadge}</div>
         <div class="card-status ${s.status}">
           <span class="status-dot ${s.status}" style="width:7px;height:7px;display:inline-block"></span>
           ${s.status}
@@ -224,9 +261,20 @@ function renderServices(filter = '') {
         <button class="btn btn-sm btn-success" onclick="serviceAction('${s.id}','start')">Start</button>
         <button class="btn btn-sm btn-danger" onclick="serviceAction('${s.id}','stop')">Stop</button>
         <button class="btn btn-sm btn-secondary" onclick="serviceAction('${s.id}','restart')">Restart</button>
+        <button class="btn btn-sm btn-ghost" onclick="scanService('${s.id}')">Scan</button>
       </div>
+      ${vulnCount > 0 ? `
+        <div style="margin-top:14px;padding-top:12px;border-top:1px solid rgba(124,58,237,0.12)">
+          ${s.vulns.map(v => `
+            <div style="font-size:12.5px;margin-bottom:6px;display:flex;gap:8px;align-items:flex-start">
+              <span style="color:${v.severity === 'high' ? '#ef4444' : v.severity === 'medium' ? '#f59e0b' : '#6b6480'};font-weight:700;min-width:52px">${v.severity.toUpperCase()}</span>
+              <span>${escapeHtml(v.title)}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
     </div>
-  `).join('');
+  `}).join('');
 }
 
 function renderUtils() {
@@ -286,12 +334,10 @@ function switchTab(tab) {
   currentTab = tab;
 
   document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-  const activeBtn = document.querySelector(`[data-tab="${tab}"]`);
-  if (activeBtn) activeBtn.classList.add('active');
+  document.querySelector(`[data-tab="${tab}"]`)?.classList.add('active');
 
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  const panel = document.getElementById(`tab-${tab}`);
-  if (panel) panel.classList.add('active');
+  document.getElementById(`tab-${tab}`)?.classList.add('active');
 
   const titles = {
     services: ['Сервисы', 'Управление и мониторинг'],
@@ -449,6 +495,8 @@ function setupActions() {
     addLog('warn', 'Restart All requested');
   });
 
+  document.getElementById('scan-all')?.addEventListener('click', scanAll);
+
   document.getElementById('clear-logs')?.addEventListener('click', () => {
     logs = [];
     renderLogs();
@@ -484,6 +532,43 @@ function serviceAction(id, action) {
 function restartUtil(name) {
   toast('info', `${name}: restart queued`);
   addLog('info', `${name} restart requested`);
+}
+
+function scanService(id) {
+  const svc = services.find(s => s.id === id);
+  if (!svc) return;
+
+  toast('info', `Сканирую ${svc.name}...`);
+  addLog('info', `Vulnerability scan started → ${svc.name}`);
+
+  setTimeout(() => {
+    const findings = vulnDatabase[id] || [
+      { severity: 'low', title: 'No critical issues found' }
+    ];
+
+    const count = Math.floor(Math.random() * findings.length) + 1;
+    svc.vulns = findings.slice(0, count);
+
+    renderServices(document.getElementById('service-search')?.value || '');
+
+    const high = svc.vulns.filter(v => v.severity === 'high').length;
+    if (high > 0) {
+      toast('error', `${svc.name}: ${svc.vulns.length} уязвимостей (${high} high)`);
+      addLog('error', `Scan ${svc.name}: ${svc.vulns.length} findings, ${high} high`);
+    } else {
+      toast('warn', `${svc.name}: ${svc.vulns.length} уязвимостей`);
+      addLog('warn', `Scan ${svc.name}: ${svc.vulns.length} findings`);
+    }
+  }, 700 + Math.random() * 800);
+}
+
+function scanAll() {
+  toast('info', 'Полный скан всех сервисов...');
+  addLog('info', 'Full vulnerability scan started');
+
+  services.forEach((svc, i) => {
+    setTimeout(() => scanService(svc.id), i * 550);
+  });
 }
 
 function mockPing() {
