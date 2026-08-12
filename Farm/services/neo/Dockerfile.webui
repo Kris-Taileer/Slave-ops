@@ -1,0 +1,24 @@
+FROM golang:1.21-alpine as build
+
+ENV CGO_ENABLED=0
+
+WORKDIR /app
+COPY go.* ./
+COPY cmd cmd
+COPY internal internal
+COPY proto/go proto/go
+COPY pkg pkg
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+        go build \
+            -ldflags="-w -s" \
+            -o neo_webui \
+            cmd/webui/main.go
+
+FROM alpine:3.19
+
+COPY --from=build /app/neo_webui /neo_webui
+
+EXPOSE 8090
+
+CMD ["/neo_webui"]

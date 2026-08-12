@@ -1,0 +1,17 @@
+.env
+*.pyc
+__pycache__/
+
+runtime/*
+!runtime/.gitkeep
+!runtime/exploits/
+runtime/exploits/*
+!runtime/exploits/.gitkeep
+
+services/S4DFarm/.env
+services/S4DFarm/vol/
+services/neo/.env
+services/neo/volumes/
+services/neo/client_env/client_config.yml
+services/neo/client_env/exploits/*
+!services/neo/client_env/exploits/.gitkeep

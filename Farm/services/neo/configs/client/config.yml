@@ -1,0 +1,7 @@
+# Sample only. The real client config is generated at
+# services/neo/client_env/client_config.yml by ./farm apply.
+host: "127.0.0.1:5005"
+metrics_host: "127.0.0.1:8428/api/v1/import/prometheus"
+exploit_dir: "exploits"
+grpc_auth_key: "generated-by-farm-apply"
+verbose: false

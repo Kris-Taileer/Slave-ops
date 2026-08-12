@@ -1,0 +1,39 @@
+project: vibe_cat_but_sad_farm
+
+server:
+  public_ip: 127.0.0.1
+  timezone: Europe/Moscow
+
+ports:
+  s4dfarm: 5137
+  https_s4dfarm: 5443
+  cacheproxy: 8888
+  external_redis: 6378
+  neo_grpc: 5005
+  neo_webui: 8090
+  https_neo_webui: 8443
+  victoria: 8428
+
+teams:
+  Team #1: 127.0.0.1
+
+flags:
+  format: 'FLAG\{[A-Za-z0-9_]+\}'
+  lifetime: 300
+
+submitter:
+  flag_limit: 100
+  period: 2
+
+checksystem:
+  protocol: ctfcup_tcp
+  host: 5.129.237.176
+  port: 31337
+  token: ''
+  team_token: ''
+
+neo:
+  worker_jobs: 20
+  ping_every: 5s
+  submit_every: 2s
+  build_client_image: true

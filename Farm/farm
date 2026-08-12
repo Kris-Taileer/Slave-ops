@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+cd "${ROOT}"
+
+core_services=(
+  s4d-postgres
+  s4d-redis
+  s4d-farm
+  s4d-celery
+  s4d-front
+  s4d-cacheproxy
+  s4d-external-redis
+  neo-redis
+  neo-server
+  neo-webui
+  neo-victoria
+  tls-proxy
+)
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./farm apply             generate configs from attdef.yml
+  ./farm up                apply config, build images, start farm + neo
+  ./farm down              stop containers
+  ./farm restart           apply config and restart running services
+  ./farm status            show containers and HTTP checks
+  ./farm password          print local UI passwords
+  ./farm logs [service]    follow docker compose logs
+  ./farm cert              show self-signed TLS certificate fingerprint
+  ./farm worker            start managed Neo worker in background
+  ./farm worker restart    restart managed Neo worker
+  ./farm worker stop       stop managed Neo worker
+  ./farm worker delete     remove managed Neo worker and old neo-latest container
+  ./farm worker logs       follow managed Neo worker logs
+  ./farm worker status     show managed Neo worker container
+  ./farm worker run [args] run Neo worker in foreground, default: -j worker_jobs
+  ./farm neo [args...]     run raw Neo client command
+  ./farm build-client      build full Neo exploit image
+EOF
+}
+
+load_env() {
+  if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+  fi
+}
+
+worker_jobs() {
+  awk '
+    /^neo:/ { in_neo=1; next }
+    /^[^[:space:]]/ { in_neo=0 }
+    in_neo && /^[[:space:]]+worker_jobs:/ { print $2; found=1; exit }
+    END { if (!found) print "20" }
+  ' attdef.yml
+}
+
+client_image_build_disabled() {
+  awk '
+    /^neo:/ { in_neo=1; next }
+    /^[^[:space:]]/ { in_neo=0 }
+    in_neo && /build_client_image:[[:space:]]*false/ { found=1 }
+    END { exit found ? 0 : 1 }
+  ' attdef.yml
+}
+
+build_neo_client_image() {
+  docker compose --profile tools build neo-client-image
+}
+
+build_neo_client_image_if_enabled() {
+  if client_image_build_disabled; then
+    echo "Skipping Neo client image build."
+  else
+    build_neo_client_image
+  fi
+}
+
+legacy_worker_container_name() {
+  local version="${NEO_VERSION:-}"
+  if [[ -z "${version}" && -f services/neo/client_env/.version ]]; then
+    version="$(xargs < services/neo/client_env/.version)"
+  fi
+  printf "neo-%s\n" "${version:-latest}"
+}
+
+remove_legacy_worker_container() {
+  local name
+  name="$(legacy_worker_container_name)"
+  if docker ps -a --filter "name=^${name}$" --format "{{ .Names }}" | grep -qx "${name}"; then
+    echo "Removing legacy Neo worker container ${name}."
+    docker rm -f "${name}" >/dev/null
+  fi
+}
+
+start_managed_worker() {
+  remove_legacy_worker_container
+  docker compose up -d --remove-orphans --force-recreate neo-worker
+}
+
+stop_managed_worker() {
+  docker compose stop neo-worker
+}
+
+delete_managed_worker() {
+  docker compose rm -sf neo-worker
+  remove_legacy_worker_container
+}
+
+run_worker_foreground() {
+  ensure_neo_client_container
+  jobs="$(worker_jobs)"
+  cd services/neo/client_env
+  if [[ "$#" -eq 0 ]]; then
+    ./start.sh neo run -j "${jobs}" --timeout-autoscale-target 0
+  else
+    ./start.sh neo run "$@"
+  fi
+}
+
+ensure_neo_client_container() {
+  mkdir -p runtime
+  local lockdir="${ROOT}/runtime/neo-client.lock"
+  until mkdir "${lockdir}" 2>/dev/null; do
+    sleep 0.2
+  done
+  (
+    trap 'rmdir "${lockdir}"' EXIT
+    cd services/neo/client_env
+    ./start.sh true >/dev/null
+  )
+}
+
+redact_neo_info() {
+  sed -E \
+    -e 's/(FarmPassword:)[^ ]+/\1<redacted>/g' \
+    -e 's/(farm_password:[[:space:]]*)[^ ]+/\1<redacted>/g'
+}
+
+print_tls_cert() {
+  if [[ ! -f runtime/tls/farm.crt ]]; then
+    echo "TLS certificate is missing. Run ./farm apply first."
+    exit 1
+  fi
+  openssl x509 -in runtime/tls/farm.crt -noout -subject -issuer -dates -fingerprint -sha256
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "${cmd}" in
+  apply)
+    python3 scripts/apply_config.py attdef.yml
+    ;;
+  up)
+    python3 scripts/apply_config.py attdef.yml
+    docker compose up --build -d --remove-orphans "${core_services[@]}"
+    build_neo_client_image_if_enabled
+    start_managed_worker
+    ;;
+  down)
+    docker compose down --remove-orphans
+    remove_legacy_worker_container
+    ;;
+  restart)
+    python3 scripts/apply_config.py attdef.yml
+    docker compose up --build -d --remove-orphans "${core_services[@]}"
+    build_neo_client_image_if_enabled
+    start_managed_worker
+    ;;
+  status)
+    python3 scripts/apply_config.py attdef.yml >/dev/null
+    load_env
+    docker compose ps
+    printf "\nChecks:\n"
+    if curl -fsS -H "Authorization: ${SERVER_PASSWORD}" "http://127.0.0.1:${S4DFARM_PORT}/api/get_config" >/dev/null 2>&1; then
+      echo "  S4DFarm API: ok"
+    else
+      echo "  S4DFarm API: fail"
+    fi
+    if curl -fsS -u "admin:${WEB_PASSWORD}" "http://127.0.0.1:${NEO_WEBUI_PORT}/" >/dev/null 2>&1; then
+      echo "  Neo Web UI: ok"
+    else
+      echo "  Neo Web UI: fail"
+    fi
+    if curl -kfsS -H "Authorization: ${SERVER_PASSWORD}" "https://127.0.0.1:${HTTPS_S4DFARM_PORT}/api/get_config" >/dev/null 2>&1; then
+      echo "  TLS proxy S4DFarm: ok"
+    else
+      echo "  TLS proxy S4DFarm: fail"
+    fi
+    if curl -kfsS -u "admin:${WEB_PASSWORD}" "https://127.0.0.1:${HTTPS_NEO_WEBUI_PORT}/" >/dev/null 2>&1; then
+      echo "  TLS proxy Neo Web UI: ok"
+    else
+      echo "  TLS proxy Neo Web UI: fail"
+    fi
+    ;;
+  password)
+    python3 scripts/apply_config.py attdef.yml >/dev/null
+    load_env
+    printf "S4DFarm password: %s\n" "${SERVER_PASSWORD}"
+    printf "Neo Web UI password: %s\n" "${WEB_PASSWORD}"
+    printf "External Redis password: %s\n" "${EXTERNAL_REDIS_PASSWORD}"
+    ;;
+  cert)
+    python3 scripts/apply_config.py attdef.yml >/dev/null
+    print_tls_cert
+    ;;
+  logs)
+    docker compose logs -f "$@"
+    ;;
+  build-client)
+    python3 scripts/apply_config.py attdef.yml
+    build_neo_client_image
+    ;;
+  worker)
+    subcmd="${1:-start}"
+    if [[ "$#" -gt 0 ]]; then
+      shift
+    fi
+    case "${subcmd}" in
+      start)
+        python3 scripts/apply_config.py attdef.yml >/dev/null
+        start_managed_worker
+        ;;
+      restart)
+        python3 scripts/apply_config.py attdef.yml >/dev/null
+        start_managed_worker
+        ;;
+      stop)
+        stop_managed_worker
+        ;;
+      delete|rm|remove)
+        delete_managed_worker
+        ;;
+      logs)
+        docker compose logs -f neo-worker
+        ;;
+      status)
+        docker compose ps neo-worker
+        ;;
+      run)
+        python3 scripts/apply_config.py attdef.yml >/dev/null
+        run_worker_foreground "$@"
+        ;;
+      -*)
+        python3 scripts/apply_config.py attdef.yml >/dev/null
+        run_worker_foreground "${subcmd}" "$@"
+        ;;
+      *)
+        usage
+        exit 2
+        ;;
+    esac
+    ;;
+  neo)
+    python3 scripts/apply_config.py attdef.yml >/dev/null
+    ensure_neo_client_container
+    cd services/neo/client_env
+    if [[ "${1:-}" == "info" ]]; then
+      ./start.sh neo "$@" | redact_neo_info
+    else
+      ./start.sh neo "$@"
+    fi
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -1,0 +1,20 @@
+.idea
+.DS_Store
+/neo_client*
+/neo_server
+/server
+/client
+db.db
+/dist
+/client_env/.version
+/data
+!/data/.keep
+
+# release files
+client_config.yml
+server_config.yml
+/exploits
+
+kek*
+volumes
+/.env

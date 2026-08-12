@@ -1,0 +1,249 @@
+services:
+  s4d-farm:
+    build:
+      context: ./services/S4DFarm/server
+      dockerfile: ./docker/server/Dockerfile
+    volumes:
+      - ./services/S4DFarm/server/app:/app
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      POSTGRES_DSN: "host=postgres port=5432 user=farm password=farm dbname=farm"
+      SERVER_PASSWORD: ${SERVER_PASSWORD}
+      DEBUG: ${DEBUG:-0}
+    depends_on:
+      s4d-postgres:
+        condition: service_healthy
+      s4d-redis:
+        condition: service_healthy
+    networks:
+      s4d:
+        aliases:
+          - farm
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 5000), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  s4d-celery:
+    build:
+      context: ./services/S4DFarm/server
+      dockerfile: ./docker/celery/Dockerfile
+    volumes:
+      - ./services/S4DFarm/server/app:/app
+      - s4d-celery-data:/data
+    environment:
+      CELERY_BROKER_URL: "redis://redis:6379/1"
+      POSTGRES_DSN: "host=postgres port=5432 user=farm password=farm dbname=farm"
+      FARM_DATA: /data
+    depends_on:
+      s4d-postgres:
+        condition: service_healthy
+      s4d-redis:
+        condition: service_healthy
+    networks:
+      s4d:
+        aliases:
+          - celery
+    restart: unless-stopped
+
+  s4d-front:
+    build:
+      context: ./services/S4DFarm/server
+      dockerfile: ./docker/front/Dockerfile
+    ports:
+      - "127.0.0.1:${S4DFARM_PORT:-5137}:80"
+    depends_on:
+      s4d-farm:
+        condition: service_healthy
+      s4d-celery:
+        condition: service_started
+    networks:
+      - s4d
+    restart: unless-stopped
+
+  s4d-postgres:
+    image: postgres:14.1-alpine
+    environment:
+      POSTGRES_USER: farm
+      POSTGRES_PASSWORD: farm
+      POSTGRES_DB: farm
+    volumes:
+      - s4d-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U farm -d farm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      s4d:
+        aliases:
+          - postgres
+    restart: unless-stopped
+
+  s4d-redis:
+    image: redis:7.2.0-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - s4d-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      s4d:
+        aliases:
+          - redis
+    restart: unless-stopped
+
+  s4d-cacheproxy:
+    build: ./services/S4DFarm/httpproxy
+    environment:
+      REDIS_URL: "redis://redis:6379/2"
+    ports:
+      - "${CACHEPROXY_PORT:-8888}:8888"
+    depends_on:
+      s4d-redis:
+        condition: service_healthy
+    networks:
+      - s4d
+    restart: unless-stopped
+
+  s4d-external-redis:
+    image: redis:7.2.0-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${EXTERNAL_REDIS_PASSWORD}"]
+    ports:
+      - "${EXTERNAL_REDIS_PORT:-6378}:6379"
+    volumes:
+      - s4d-external-redis-data:/data
+    networks:
+      - s4d
+    restart: unless-stopped
+
+  neo-server:
+    build: ./services/neo
+    volumes:
+      - ./services/neo/configs/server/config.yml:/config.yml:ro
+      - neo-data:/data
+    environment:
+      NEO_GRPC_AUTH_KEY: ${GRPC_AUTH_KEY}
+      NEO_FARM_PASSWORD: ${FARM_PASSWORD}
+      NEO_FARM_URL: ${NEO_FARM_URL}
+      NEO_LOG_LEVEL: warn
+    ports:
+      - "${NEO_GRPC_PORT:-5005}:5005"
+    depends_on:
+      s4d-farm:
+        condition: service_healthy
+      neo-redis:
+        condition: service_healthy
+    networks:
+      s4d: {}
+      neo:
+        aliases:
+          - server
+    restart: unless-stopped
+
+  neo-webui:
+    build:
+      context: ./services/neo
+      dockerfile: Dockerfile.webui
+    environment:
+      NEO_WEB_ADDR: ":8090"
+      NEO_GRPC_ADDR: "server:5005"
+      NEO_GRPC_AUTH_KEY: ${GRPC_AUTH_KEY}
+      NEO_WEB_PASSWORD: ${WEB_PASSWORD}
+    ports:
+      - "127.0.0.1:${NEO_WEBUI_PORT:-8090}:8090"
+    depends_on:
+      - neo-server
+    networks:
+      - neo
+    restart: unless-stopped
+
+  neo-redis:
+    image: redis:7.2.0-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - neo
+    restart: unless-stopped
+
+  neo-victoria:
+    image: victoriametrics/victoria-metrics:v1.92.1
+    volumes:
+      - ./services/neo/monitoring/cfg/prometheus:/etc/prometheus:ro
+      - neo-victoria-data:/victoria-metrics-data
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-promscrape.config=/etc/prometheus/config.yml"
+    ports:
+      - "127.0.0.1:${VICTORIA_PORT:-8428}:8428"
+    networks:
+      - neo
+      - s4d
+    restart: unless-stopped
+
+  neo-worker:
+    image: ghcr.io/c4t-but-s4d/neo_env:latest
+    init: true
+    volumes:
+      - ./services/neo/client_env:/work
+    command: ["neo", "run", "-j", "${NEO_WORKER_JOBS:-20}", "--timeout-autoscale-target", "0"]
+    network_mode: host
+    privileged: true
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - neo-server
+      - neo-victoria
+      - s4d-front
+    restart: unless-stopped
+
+  tls-proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./services/tls-proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./runtime/tls:/etc/farm-tls:ro
+    ports:
+      - "${HTTPS_S4DFARM_PORT:-5443}:5443"
+      - "${HTTPS_NEO_WEBUI_PORT:-8443}:8443"
+    depends_on:
+      - s4d-front
+      - neo-webui
+    networks:
+      - s4d
+      - neo
+    restart: unless-stopped
+
+  neo-client-image:
+    build:
+      context: ./services/neo
+      dockerfile: client_env/Dockerfile
+      target: image-full
+    image: ghcr.io/c4t-but-s4d/neo_env:latest
+    profiles:
+      - tools
+    command: ["true"]
+
+networks:
+  s4d:
+  neo:
+
+volumes:
+  s4d-postgres-data:
+  s4d-redis-data:
+  s4d-external-redis-data:
+  s4d-celery-data:
+  neo-data:
+  neo-victoria-data:

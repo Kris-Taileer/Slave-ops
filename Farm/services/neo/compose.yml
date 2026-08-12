@@ -1,0 +1,51 @@
+services:
+  server:
+    build: .
+    volumes:
+      - "./configs/server/config.yml:/config.yml:ro"
+      - "./volumes/data:/data"
+    environment:
+      NEO_GRPC_AUTH_KEY: ${GRPC_AUTH_KEY}
+      NEO_FARM_PASSWORD: ${FARM_PASSWORD}
+      NEO_FARM_URL: ${FARM_URL}
+      NEO_LOG_LEVEL: warn
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - '5005:5005'
+    restart: unless-stopped
+
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile.webui
+    environment:
+      NEO_WEB_ADDR: ":8090"
+      NEO_GRPC_ADDR: "server:5005"
+      NEO_GRPC_AUTH_KEY: ${GRPC_AUTH_KEY}
+      NEO_WEB_PASSWORD: ${WEB_PASSWORD}
+    ports:
+      - "8090:8090"
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2.0-alpine
+    restart: unless-stopped
+
+  victoria:
+    image: victoriametrics/victoria-metrics:v1.92.1
+    volumes:
+      - ./monitoring/cfg/prometheus:/etc/prometheus
+      - ./volumes/victoria-metrics:/victoria-metrics-data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-promscrape.config=/etc/prometheus/config.yml"
+    restart: unless-stopped
+    cpus: 2
+    mem_limit: 4gb
+    ports:
+      - "8428:8428"
