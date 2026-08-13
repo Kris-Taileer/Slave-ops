@@ -199,6 +199,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(404, {'error': 'not found'})
         if not self._authed():
             return self._send_json(401, {'error': 'unauthorized'})
+        if path == '/api/boards':
+            body = self._read_json_body()
+            if body is None:
+                return self._send_json(400, {'error': 'bad json'})
+            try:
+                boards = Config.runner.store.rename_board(
+                    (body.get('old') or '').strip(), body.get('new', ''))
+            except KeyError:
+                return self._send_json(404, {'error': 'unknown board'})
+            except store.ValidationError as e:
+                return self._send_json(400, {'error': str(e)})
+            return self._send_json(200, {'ok': True, 'boards': boards})
         m = re.match(r'^/api/blocks/([^/]+)$', path)
         if not m:
             return self._send_json(404, {'error': 'not found'})
@@ -227,6 +239,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(404, {'error': 'not found'})
         if not self._authed():
             return self._send_json(401, {'error': 'unauthorized'})
+        if path == '/api/boards':
+            body = self._read_json_body() or {}
+            name = (body.get('name') or '').strip()
+            if not Config.runner.store.delete_board(name):
+                return self._send_json(400, {'error': 'cannot delete this board'})
+            return self._send_json(200, {'ok': True, 'boards': Config.runner.store.list_boards()})
         m = re.match(r'^/api/blocks/([^/]+)$', path)
         if not m:
             return self._send_json(404, {'error': 'not found'})
@@ -268,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._get_compose(m.group(1))
 
+        if path == '/api/boards':
+            return self._send_json(200, {'boards': Config.runner.store.list_boards()})
+
         if path == '/api/blocks':
             return self._blocks_list()
 
@@ -304,6 +325,7 @@ class Handler(BaseHTTPRequestHandler):
     ALLOWED_BLOCK_FIELDS = (
         'type', 'mode', 'venv', 'requirements', 'args',
         'timeout', 'port', 'start_period', 'depends_on', 'pass_stdout',
+        'x', 'y', 'board',
     )
 
     def _block_fields(self, body):
@@ -318,14 +340,15 @@ class Handler(BaseHTTPRequestHandler):
             levels = {bid: 0 for bid in blocks}
         keys = ('id', 'name', 'type', 'mode', 'venv', 'status', 'exit_code',
                 'depends_on', 'pass_stdout', 'port', 'timeout', 'started_at',
-                'finished_at', 'last_error')
+                'finished_at', 'last_error', 'x', 'y', 'board')
         out = []
         for bid, b in blocks.items():
             item = {k: b.get(k) for k in keys}
             item['level'] = levels.get(bid, 0)
             out.append(item)
         out.sort(key=lambda x: (x['level'], x['id']))
-        return self._send_json(200, {'blocks': out, 'generated_at': data.get('generated_at')})
+        return self._send_json(200, {'blocks': out, 'boards': data.get('boards', ['default']),
+                                     'generated_at': data.get('generated_at')})
 
     def _block_get(self, name):
         if not NAME_RE.match(name):
@@ -405,6 +428,19 @@ class Handler(BaseHTTPRequestHandler):
             content = body.get('content', '')
             apply_ = bool(body.get('apply', False))
             return self._save_compose(name, content, apply_)
+
+        if path == '/api/boards':
+            body = self._read_json_body()
+            if body is None:
+                return self._send_json(400, {'error': 'bad json'})
+            name = (body.get('name') or '').strip()
+            if not name:
+                return self._send_json(400, {'error': 'name required'})
+            try:
+                boards = Config.runner.store.create_board(name)
+            except store.ValidationError as e:
+                return self._send_json(400, {'error': str(e)})
+            return self._send_json(201, {'ok': True, 'boards': boards})
 
         if path == '/api/blocks':
             body = self._read_json_body()

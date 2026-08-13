@@ -71,6 +71,7 @@
             <button class="btn btn-danger" id="pipeline-stop">■ Стоп</button>
           </div>
         </div>
+        <div class="boards-bar" id="boards-bar"></div>
         <div class="graph-hint">Соедини блоки: потяни за <b>кружок</b> на правом краю блока к другому блоку. Клик по стрелке-связи удаляет её.</div>
         <div class="blocks-graph" id="blocks-graph">
           <svg class="graph-edges" id="graph-edges"></svg>
@@ -97,6 +98,9 @@
             <div class="bm-body">
               <div class="bm-form">
                 <div class="insp-form">
+                  <label>Вкладка
+                    <select id="insp-board"></select>
+                  </label>
                   <div class="insp-row">
                     <label>Тип
                       <select id="insp-type">

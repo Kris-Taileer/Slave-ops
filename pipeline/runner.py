@@ -42,6 +42,7 @@ class Runner:
         self._lock = threading.RLock()
         self._procs = {}      # block_id -> Popen | None(claimed, still starting)
         self._stopping = set()  # ids the operator asked to stop
+        self._pipeline_active = False  # a sequential pipeline run is in progress
         self._reconcile()
 
     # -- startup reconciliation -------------------------------------------------
@@ -87,27 +88,69 @@ class Runner:
         self.run_block(block_id)
 
     def run_pipeline(self):
-        """Run the whole DAG: reset idle-ish blocks to queued, launch the roots."""
-        data = self.store.load()
-        blocks = data["blocks"]
+        """Run the whole DAG **sequentially**: reset idle-ish blocks to queued,
+        then start blocks one at a time in dependency order. The next block is
+        only launched once the previous one has actually reached ``running``
+        (a visible, ordered roll-out instead of a simultaneous burst). A block
+        that also has dependencies additionally waits for them to *succeed*, so
+        data passing between connected blocks stays correct.
+        """
+        blocks = self.store.load()["blocks"]
         store.validate_graph(blocks)  # raises on cycle / bad edge
         with self._lock:
             running = set(self._procs)
-        for bid, b in blocks.items():
+        for bid in blocks:
             if bid in running:
                 continue
             self.store.set_status(
                 bid, "queued", exit_code=None, finished_at=None, last_error=None
             )
-        self._log("info", "pipeline", "run started")
-        # launch every root (no dependencies) that we just queued
-        for bid, b in blocks.items():
-            if bid in running:
-                continue
-            if not b["depends_on"]:
+        order = store.topo_sort(self.store.load()["blocks"])
+        self._pipeline_active = True
+        self._log("info", "pipeline", "sequential run started (%d blocks)" % len(order))
+        threading.Thread(target=self._pipeline_worker, args=(order,), daemon=True).start()
+
+    def _pipeline_worker(self, order):
+        try:
+            for bid in order:
+                self._pipeline_step(bid)
+        finally:
+            self._pipeline_active = False
+        self._log("info", "pipeline", "run finished")
+
+    def _pipeline_step(self, bid):
+        """Bring one block to the point where the next may start: wait until its
+        dependencies have succeeded, launch it, then wait until it is running."""
+        deadline = time.time() + 3600
+        while time.time() < deadline:
+            blocks = self.store.load()["blocks"]
+            b = blocks.get(bid)
+            if b is None:
+                return
+            if b["status"] in ("running", "success") or self.is_running(bid):
+                return  # already up / handled (e.g. a service left running)
+            deps = [blocks[d]["status"] for d in b["depends_on"] if d in blocks]
+            if any(s in store.FAILED_STATUSES for s in deps):
+                self.store.set_status(bid, "blocked", last_error="upstream did not succeed")
+                self._log("warn", bid, "blocked (upstream failed)")
+                return
+            if all(s == "success" for s in deps):  # no deps, or every dep done
                 self._launch(bid)
+                # advance to the next block only once this one is actually running
+                self._wait_state(bid, ("running", "success", "error", "hanging", "stopped"), 60)
+                return
+            time.sleep(0.1)
+
+    def _wait_state(self, bid, states, timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            b = self.store.get_block(bid)
+            if b and b["status"] in states:
+                return
+            time.sleep(0.05)
 
     def stop_pipeline(self):
+        self._pipeline_active = False
         with self._lock:
             running = list(self._procs)
         for bid in running:
@@ -312,7 +355,8 @@ class Runner:
         if rc == 0:
             self._finalize(block_id, "success", exit_code=0)
         else:
-            self._finalize(block_id, "error", exit_code=rc, last_error=f"exit code {rc}")
+            self._finalize(block_id, "error", exit_code=rc,
+                           last_error=self._error_detail(block_id, f"exit code {rc}"))
 
     def _watch_service(self, block_id, proc, block):
         # give it a moment to either stay up or die immediately
@@ -324,7 +368,7 @@ class Runner:
             if self._claimed_stop(block_id):
                 return
             self._finalize(block_id, "error", exit_code=rc,
-                           last_error=f"service exited early (code {rc})")
+                           last_error=self._error_detail(block_id, f"service exited early (code {rc})"))
             return
         # optional port probe
         port = block.get("port")
@@ -347,7 +391,8 @@ class Runner:
             self._procs.pop(block_id, None)
         self._write_log(block_id, f"\n[runner] service exited (code {rc})\n")
         self.store.set_status(block_id, "error", exit_code=rc,
-                              last_error=f"service crashed (code {rc})", finished_at=_now())
+                              last_error=self._error_detail(block_id, f"service crashed (code {rc})"),
+                              finished_at=_now())
         self._log("error", block_id, f"service crashed (code {rc})")
 
     def _finalize(self, block_id, status, exit_code=None, last_error=None):
@@ -364,20 +409,26 @@ class Runner:
     def _cascade(self, block_id, status):
         """Propagate a block's terminal status to its direct dependents.
 
-        On success, launch dependents whose every dependency has succeeded.
-        On failure, mark still-pending dependents blocked and recurse.
-        Only touches dependents in ('queued', 'blocked') — already-finished or
-        idle (unscheduled) blocks are left alone, so independent chains and
-        completed work are never disturbed.
+        On success, auto-run every direct dependent whose dependencies have all
+        succeeded — so running one block flows down the whole connected chain by
+        itself (idle dependents included). Dependents already running are left
+        alone. On failure, still-pending dependents are marked blocked and the
+        block propagates further down. Unconnected blocks have no dependents, so
+        they are never touched here.
+
+        During a sequential pipeline run the worker drives every launch itself,
+        so cascading is skipped to keep the one-at-a-time ordering.
         """
+        if self._pipeline_active:
+            return
         blocks = self.store.load()["blocks"]
         for dep_id in store.dependents(blocks, block_id):
             dep = blocks[dep_id]
-            if dep["status"] not in ("queued", "blocked"):
+            if dep["status"] == "running" or self.is_running(dep_id):
                 continue
             dep_statuses = [blocks[d]["status"] for d in dep["depends_on"] if d in blocks]
-            if all(s == "success" for s in dep_statuses):
-                self._launch(dep_id)
+            if dep_statuses and all(s == "success" for s in dep_statuses):
+                self._launch(dep_id)   # next block in the chain runs automatically
             elif any(s in store.FAILED_STATUSES for s in dep_statuses):
                 if dep["status"] != "blocked":
                     self.store.set_status(dep_id, "blocked",
@@ -424,6 +475,23 @@ class Runner:
             except OSError:
                 time.sleep(0.2)
         return False
+
+    def _error_detail(self, block_id, fallback):
+        """Last meaningful line of a block's output, for a compact error label.
+
+        Surfaces things like a docker 'Client.Timeout exceeded' pull failure right
+        on the block, instead of a generic 'exit code 1'.
+        """
+        try:
+            with open(self.store.output_path(block_id), encoding="utf-8", errors="replace") as f:
+                lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+        except OSError:
+            lines = []
+        for ln in reversed(lines):
+            low = ln.lower()
+            if any(k in low for k in ("error", "failed", "cannot", "exceeded", "refused", "denied")):
+                return ln[:200]
+        return lines[-1][:200] if lines else fallback
 
     def _write_log(self, block_id, text, truncate=False):
         path = self.store.output_path(block_id)

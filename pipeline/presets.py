@@ -31,6 +31,50 @@ from . import store
 # Ordered so dependencies are created before their dependents.
 PRESETS = [
     {
+        "id": "hello-web",
+        "name": "hello-web",
+        "type": "python",
+        "mode": "service",
+        "port": 7788,
+        "start_period": 1,
+        "script": '''#!/usr/bin/env python3
+"""A tiny web service you can open right away. Run this block, then click
+"Открыть" on it — it serves a page on the host at http://localhost:7788."""
+import http.server
+import socketserver
+
+PORT = 7788
+PAGE = """<!doctype html><meta charset="utf-8"><title>Aether test service</title>
+<body style="margin:0;font-family:system-ui,sans-serif;background:#08060e;color:#ece9f5;display:grid;place-items:center;height:100vh">
+  <div style="text-align:center">
+    <div style="font-size:64px;color:#34d399">✓</div>
+    <h1 style="margin:.2em 0 .1em">Сервис поднят через блок</h1>
+    <p style="opacity:.55;font-family:ui-monospace,monospace">Aether · http://localhost:7788</p>
+  </div>
+</body>""".encode("utf-8")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(PAGE)
+
+    def log_message(self, *args):
+        pass
+
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+with Server(("0.0.0.0", PORT), Handler) as httpd:
+    print("hello-web up on", PORT, flush=True)
+    httpd.serve_forever()
+''',
+    },
+    {
         "id": "gen-token",
         "name": "gen-token",
         "type": "python",
@@ -251,15 +295,20 @@ print("blocconote OK, round-trip:", got["note"])
         "id": "bandiera-up",
         "name": "bandiera-up",
         "type": "sh",
-        "mode": "task",
-        "timeout": 300,
+        "mode": "service",
+        "start_period": 5,
         "script": '''#!/bin/sh
 # bandiera is Node + MySQL, so bring it up with docker compose (app on :8181,
 # mysql on :3306). Requires docker on the host — mount /var/run/docker.sock into
-# the blocks container. Does nothing here if docker is unavailable (block errors).
-cd ../../services/bandiera || exit 1
-docker compose up -d --build
-echo "bandiera: compose up issued"
+# the blocks container.
+#
+# Compose files run as a *service* block: docker compose runs in the FOREGROUND
+# so this block holds the stack up and Stop brings it down. `set -e` + `exec`
+# mean a failed pull/build (no registry, network down, ...) exits non-zero and
+# the block goes to error with the real message in the output — never masked.
+set -e
+cd ../../services/bandiera
+exec docker compose up --build
 ''',
     },
     {

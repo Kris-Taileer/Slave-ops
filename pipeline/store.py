@@ -51,6 +51,9 @@ ACTIVE_STATUSES = ("queued", "running")
 BLOCK_TYPES = ("python", "sh")
 BLOCK_MODES = ("task", "service")
 
+# Blocks are grouped into named tabs ("boards"). This one always exists.
+DEFAULT_BOARD = "default"
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -75,6 +78,15 @@ def _coerce_int(value, default):
         return default
 
 
+def _coerce_num(value):
+    if value in (None, ""):
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
 def new_block(block_id, name, **overrides):
     """Build a block dict with defaults. ``overrides`` may set any field."""
     block = {
@@ -90,6 +102,9 @@ def new_block(block_id, name, **overrides):
         "start_period": 2,      # service: seconds alive before it counts as up
         "depends_on": [],       # ids this block waits on (connected edges)
         "pass_stdout": False,   # feed upstream stdout into this block's argv
+        "x": None,              # canvas position (set when dragged in the UI)
+        "y": None,
+        "board": DEFAULT_BOARD, # which named tab/board this block lives on
         "status": "idle",
         "exit_code": None,
         "pid": None,
@@ -128,6 +143,10 @@ def _normalize(block):
         clean_deps.append(d)
     block["depends_on"] = clean_deps
     block["pass_stdout"] = bool(block.get("pass_stdout"))
+    block["x"] = _coerce_num(block.get("x"))
+    block["y"] = _coerce_num(block.get("y"))
+    board = str(block.get("board") or DEFAULT_BOARD).strip()
+    block["board"] = board or DEFAULT_BOARD
     if block.get("status") not in STATUSES:
         block["status"] = "idle"
     return block
@@ -254,14 +273,32 @@ class Store:
                 with open(self.pipeline_file, encoding="utf-8") as f:
                     data = json.load(f)
             except (OSError, json.JSONDecodeError):
-                return {"generated_at": None, "blocks": {}}
+                data = {}
             if not isinstance(data, dict):
-                return {"generated_at": None, "blocks": {}}
+                data = {}
+            data.setdefault("generated_at", None)
             data.setdefault("blocks", {})
             for bid, b in list(data["blocks"].items()):
                 b["id"] = bid
                 _normalize(b)
+            data["boards"] = self._resolve_boards(data)
             return data
+
+    def _resolve_boards(self, data):
+        """Stored board list, kept in sync with the boards blocks reference.
+
+        Explicitly-created empty boards persist; any board a block points at is
+        also included; DEFAULT_BOARD always exists and comes first.
+        """
+        stored = data.get("boards")
+        boards = [str(x) for x in stored] if isinstance(stored, list) else []
+        for b in data["blocks"].values():
+            bd = b.get("board") or DEFAULT_BOARD
+            if bd not in boards:
+                boards.append(bd)
+        if DEFAULT_BOARD not in boards:
+            boards.insert(0, DEFAULT_BOARD)
+        return boards
 
     def _save(self, data):
         data["generated_at"] = _now()
@@ -275,6 +312,57 @@ class Store:
 
     def get_block(self, block_id):
         return self.load()["blocks"].get(block_id)
+
+    # -- boards (named tabs) --
+
+    def list_boards(self):
+        return self.load()["boards"]
+
+    def create_board(self, name):
+        name = str(name or "").strip()
+        if not name:
+            raise ValidationError("board name required")
+        with self._lock:
+            data = self.load()
+            if name not in data["boards"]:
+                data["boards"].append(name)
+                self._save(data)
+            return data["boards"]
+
+    def rename_board(self, old, new):
+        new = str(new or "").strip()
+        if not new:
+            raise ValidationError("board name required")
+        with self._lock:
+            data = self.load()
+            if old not in data["boards"]:
+                raise KeyError(old)
+            seen = []
+            for x in (new if x == old else x for x in data["boards"]):
+                if x not in seen:
+                    seen.append(x)
+            data["boards"] = seen
+            for b in data["blocks"].values():
+                if (b.get("board") or DEFAULT_BOARD) == old:
+                    b["board"] = new
+            self._save(data)
+            return data["boards"]
+
+    def delete_board(self, name):
+        """Remove a board; its blocks move back to DEFAULT_BOARD. The default
+        board itself cannot be deleted."""
+        if name == DEFAULT_BOARD:
+            return False
+        with self._lock:
+            data = self.load()
+            if name not in data["boards"]:
+                return False
+            data["boards"] = [x for x in data["boards"] if x != name]
+            for b in data["blocks"].values():
+                if (b.get("board") or DEFAULT_BOARD) == name:
+                    b["board"] = DEFAULT_BOARD
+            self._save(data)
+            return True
 
     def create_block(self, name, script="", **fields):
         """Create a new block with a unique id derived from ``name``."""
@@ -307,6 +395,7 @@ class Store:
                 allowed = {
                     "name", "type", "mode", "venv", "requirements", "args",
                     "timeout", "port", "start_period", "depends_on", "pass_stdout",
+                    "x", "y", "board",
                 }
                 for key, value in fields.items():
                     if key in allowed:

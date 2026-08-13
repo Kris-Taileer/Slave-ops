@@ -522,7 +522,7 @@ function scanAll() {
 }
 
 function mockPing() {
-  if (Math.random() > 0.65) {
+  if (services.length && Math.random() > 0.65) {
     const idx = Math.floor(Math.random() * services.length);
     const old = services[idx].status;
     services[idx].status = old === 'up' ? (Math.random() > 0.5 ? 'warn' : 'down') : 'up';
@@ -599,6 +599,10 @@ let blockOutputOffset = 0;
 let blocksTimer = null;
 let outputTimer = null;
 let connectFrom = null;   // id of the block a connect-drag started from
+let nodePos = {};         // id -> {x, y} current canvas positions
+let moveState = null;     // active node-move (reposition) drag
+let boards = ['default']; // named tabs
+let activeBoard = 'default';
 
 function initBlocks() {
   renderLegend();
@@ -634,9 +638,11 @@ function initBlocks() {
   document.getElementById('insp-mode')?.addEventListener('change', onTypeModeChange);
   document.getElementById('insp-venv')?.addEventListener('change', onTypeModeChange);
 
-  // drag-to-connect + edge delete + modal dismiss
+  // drag-to-connect, move blocks, edge delete, modal dismiss
   document.addEventListener('mousemove', moveConnect);
   document.addEventListener('mouseup', endConnect);
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', endMove);
   document.getElementById('graph-hit')?.addEventListener('click', onEdgeClick);
   const modal = document.getElementById('block-modal');
   modal?.addEventListener('mousedown', (e) => { if (e.target === modal) closeInspector(); });
@@ -669,6 +675,9 @@ function statusClass(s) { return 'st-' + (s === 'hanging' ? 'error' : s); }
 function loadBlocks() {
   return api('GET', '/api/blocks').then(data => {
     blocksData = data.blocks || [];
+    boards = data.boards && data.boards.length ? data.boards : ['default'];
+    if (!boards.includes(activeBoard)) activeBoard = boards[0];
+    renderBoards();
     renderGraph();
     if (selectedBlockId) {
       const b = blocksData.find(x => x.id === selectedBlockId);
@@ -680,42 +689,158 @@ function loadBlocks() {
   });
 }
 
-function nodeHtml(b) {
+function boardLabel(name) { return name === 'default' ? 'Основная' : name; }
+
+function renderBoards() {
+  const bar = document.getElementById('boards-bar');
+  if (!bar) return;
+  bar.innerHTML = boards.map(name => `
+    <div class="board-tab ${name === activeBoard ? 'active' : ''}" data-board="${escapeHtml(name)}">
+      <span class="board-name">${escapeHtml(boardLabel(name))}</span>
+      ${name === 'default' ? '' : `<span class="board-x" title="Удалить вкладку">✕</span>`}
+    </div>`).join('') + `<button class="board-add" id="board-add" title="Новая вкладка">+ вкладка</button>`;
+  bar.querySelectorAll('.board-tab').forEach(t => {
+    const name = t.dataset.board;
+    t.addEventListener('click', (e) => {
+      if (e.target.classList.contains('board-x')) { deleteBoard(name); return; }
+      activeBoard = name; renderBoards(); renderGraph();
+    });
+    t.querySelector('.board-name')?.addEventListener('dblclick', (e) => { e.stopPropagation(); renameBoard(name); });
+  });
+  document.getElementById('board-add')?.addEventListener('click', addBoard);
+}
+
+function addBoard() {
+  const name = (prompt('Название вкладки:') || '').trim();
+  if (!name) return;
+  api('POST', '/api/boards', { name })
+    .then(() => { activeBoard = name; toast('success', 'Вкладка создана'); return loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function renameBoard(old) {
+  const next = (prompt('Новое имя вкладки:', boardLabel(old)) || '').trim();
+  if (!next || next === old) return;
+  api('PUT', '/api/boards', { old, new: next })
+    .then(() => { if (activeBoard === old) activeBoard = next; toast('success', 'Переименовано'); return loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function deleteBoard(name) {
+  if (!confirm(`Удалить вкладку «${boardLabel(name)}»? Её блоки переедут в «Основная».`)) return;
+  api('DELETE', '/api/boards', { name })
+    .then(() => { if (activeBoard === name) activeBoard = 'default'; toast('warn', 'Вкладка удалена'); return loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function nodeHtml(b, pos) {
   const badges = [b.type, b.mode];
   if (b.venv) badges.push('venv');
   if (b.pass_stdout) badges.push('argv');
   const id = escapeHtml(b.id);
+  const cls = statusClass(b.status);
+  const open = (b.mode === 'service' && b.port)
+    ? `<a class="btn btn-open" title="Открыть :${b.port}" href="http://${location.hostname}:${b.port}/" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>`
+    : '';
   return `
-  <div class="block-node ${statusClass(b.status)} ${b.id === selectedBlockId ? 'selected' : ''}" data-id="${id}">
+  <div class="block-node ${cls} ${b.id === selectedBlockId ? 'selected' : ''}" data-id="${id}" style="left:${pos.x}px;top:${pos.y}px">
     <div class="bn-name">
       <span>${escapeHtml(b.name)}</span>
-      <span class="bn-status ${statusClass(b.status)}">${escapeHtml(b.status)}</span>
+      <span class="bn-status ${cls}"><span class="bn-spin"></span>${escapeHtml(b.status)}</span>
     </div>
     <div class="bn-badges">${badges.map(x => `<span class="bn-badge">${escapeHtml(x)}</span>`).join('')}</div>
     <div class="bn-actions">
       <button class="btn btn-success" title="Run" onclick="event.stopPropagation();nodeAction('${id}','run')">▶</button>
       <button class="btn btn-danger" title="Stop" onclick="event.stopPropagation();nodeAction('${id}','stop')">■</button>
       <button class="btn btn-ghost" title="Открыть" onclick="event.stopPropagation();selectBlock('${id}')">✎</button>
+      ${open}
     </div>
     <span class="bn-handle" data-src="${id}" title="Потяни к другому блоку, чтобы связать"></span>
   </div>`;
 }
 
+function boardBlocks() {
+  return blocksData.filter(b => (b.board || 'default') === activeBoard);
+}
+
 function renderGraph() {
-  const cols = {};
-  blocksData.forEach(b => { (cols[b.level] = cols[b.level] || []).push(b); });
-  const keys = Object.keys(cols).map(Number).sort((a, b) => a - b);
-  const columnsEl = document.getElementById('graph-columns');
+  const canvas = document.getElementById('graph-columns');
   const emptyEl = document.getElementById('graph-empty');
-  if (!columnsEl) return;
-  columnsEl.innerHTML = keys.map(k =>
-    `<div class="graph-col">${cols[k].map(nodeHtml).join('')}</div>`).join('');
-  if (emptyEl) emptyEl.style.display = blocksData.length ? 'none' : 'flex';
-  columnsEl.querySelectorAll('.block-node').forEach(n =>
-    n.addEventListener('click', () => selectBlock(n.dataset.id)));
-  columnsEl.querySelectorAll('.bn-handle').forEach(h =>
+  if (!canvas) return;
+
+  const items = boardBlocks();
+  // Default layout: columns by topo level, rows within a level. Saved x/y
+  // (set by dragging a block) override the default.
+  const cols = {};
+  items.forEach(b => { (cols[b.level] = cols[b.level] || []).push(b); });
+  const COL_W = 300, ROW_H = 155, PAD = 24;
+  const pos = {};
+  Object.keys(cols).map(Number).sort((a, b) => a - b).forEach(lv => {
+    cols[lv].forEach((b, i) => { pos[b.id] = { x: PAD + lv * COL_W, y: PAD + i * ROW_H }; });
+  });
+  items.forEach(b => { if (b.x != null && b.y != null) pos[b.id] = { x: b.x, y: b.y }; });
+  nodePos = pos;
+
+  canvas.innerHTML = items.map(b => nodeHtml(b, pos[b.id])).join('');
+  if (emptyEl) emptyEl.style.display = items.length ? 'none' : 'flex';
+
+  let maxX = 400, maxY = 300;
+  items.forEach(b => { const p = pos[b.id]; maxX = Math.max(maxX, p.x + 260); maxY = Math.max(maxY, p.y + 200); });
+  canvas.style.width = maxX + 'px';
+  canvas.style.height = maxY + 'px';
+
+  canvas.querySelectorAll('.block-node').forEach(n => {
+    n.addEventListener('mousedown', (e) => startMove(e, n));
+    n.addEventListener('click', () => {
+      if (n._suppressClick) { n._suppressClick = false; return; }  // was a drag, not a click
+      selectBlock(n.dataset.id);
+    });
+  });
+  canvas.querySelectorAll('.bn-handle').forEach(h =>
     h.addEventListener('mousedown', (e) => startConnect(e, h.dataset.src)));
   requestAnimationFrame(drawEdges);
+}
+
+/* --- move a block around the canvas --- */
+
+function startMove(e, node) {
+  if (e.button !== 0) return;
+  if (e.target.closest('.bn-handle') || e.target.closest('.bn-actions')) return;  // those have their own gestures
+  const id = node.dataset.id;
+  const p = nodePos[id] || { x: 0, y: 0 };
+  moveState = { id, node, startX: e.clientX, startY: e.clientY, origX: p.x, origY: p.y, moved: false };
+}
+
+function onMove(e) {
+  if (!moveState) return;
+  const dx = e.clientX - moveState.startX, dy = e.clientY - moveState.startY;
+  if (!moveState.moved && Math.abs(dx) + Math.abs(dy) > 4) {
+    moveState.moved = true;
+    stopBlocksPolling();
+    document.body.style.userSelect = 'none';
+    moveState.node.classList.add('dragging');
+  }
+  if (moveState.moved) {
+    const nx = Math.max(0, moveState.origX + dx), ny = Math.max(0, moveState.origY + dy);
+    moveState.node.style.left = nx + 'px';
+    moveState.node.style.top = ny + 'px';
+    nodePos[moveState.id] = { x: nx, y: ny };
+    drawEdges();
+  }
+}
+
+function endMove(e) {
+  if (!moveState) return;
+  const ms = moveState;
+  moveState = null;
+  document.body.style.userSelect = '';
+  ms.node.classList.remove('dragging');
+  if (!ms.moved) return;                 // plain click — let the click handler open the block
+  ms.node._suppressClick = true;
+  const p = nodePos[ms.id];
+  api('PUT', '/api/blocks/' + encodeURIComponent(ms.id), { x: Math.round(p.x), y: Math.round(p.y) })
+    .catch(err => toast('error', err.message))
+    .finally(() => startBlocksPolling());
 }
 
 function drawEdges() {
@@ -852,6 +977,9 @@ function selectBlock(id) {
     document.getElementById('insp-timeout').value = b.timeout != null ? b.timeout : 60;
     document.getElementById('insp-port').value = b.port != null ? b.port : '';
     document.getElementById('insp-pass').checked = !!b.pass_stdout;
+    document.getElementById('insp-board').innerHTML = boards.map(nm =>
+      `<option value="${escapeHtml(nm)}" ${nm === (b.board || 'default') ? 'selected' : ''}>${escapeHtml(boardLabel(nm))}</option>`
+    ).join('');
     fillDeps(id, b.depends_on || []);
     setInspStatus(b.status);
     if (blockEditor) {
@@ -917,6 +1045,7 @@ function collectForm() {
     port: portVal ? parseInt(portVal, 10) : null,
     depends_on: deps,
     pass_stdout: document.getElementById('insp-pass').checked,
+    board: document.getElementById('insp-board').value,
     script: blockEditor ? blockEditor.getValue() : document.getElementById('block-editor').value,
   };
 }
@@ -958,7 +1087,7 @@ function deleteSelected() {
 function addBlock() {
   const name = (prompt('Имя нового блока:') || '').trim();
   if (!name) return;
-  api('POST', '/api/blocks', { name, type: 'python', script: '' })
+  api('POST', '/api/blocks', { name, type: 'python', script: '', board: activeBoard })
     .then(r => { toast('success', 'Блок создан'); return loadBlocks().then(() => selectBlock(r.id)); })
     .catch(err => toast('error', err.message));
 }

@@ -176,6 +176,20 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             self.store.set_status(b["id"], "bogus")
 
+    def test_position_fields(self):
+        b = self.store.create_block("pos")
+        self.assertIsNone(b["x"])
+        self.assertIsNone(b["y"])
+        self.store.update_block(b["id"], {"x": 120.5, "y": 40})
+        got = self.store.get_block(b["id"])
+        self.assertEqual(got["x"], 120.5)
+        self.assertEqual(got["y"], 40)
+        # blank clears back to None
+        self.store.update_block(b["id"], {"x": "", "y": None})
+        got = self.store.get_block(b["id"])
+        self.assertIsNone(got["x"])
+        self.assertIsNone(got["y"])
+
     def test_delete_detaches_dependents(self):
         a = self.store.create_block("a")
         b = self.store.create_block("b")

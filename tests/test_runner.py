@@ -177,6 +177,25 @@ class GraphTests(RunnerTestCase):
         self.wait_status(b, "success")
         self.assertIn("GOT=PAYLOAD-42", self.output(b))
 
+    def test_single_run_auto_chains_idle_dependents(self):
+        # a -> b -> c, all idle; running ONLY a should flow down the whole chain
+        a, b = self._chain("print('a')\n", "print('b')\n")
+        c = self.r.store.create_block("c", script="print('c ran')\n")
+        self.r.store.update_block(c["id"], {"depends_on": [b]})
+        self.r.run_block(a)
+        self.wait_status(c["id"], "success", 15)
+        self.assertEqual(self.r.store.get_block(a)["status"], "success")
+        self.assertEqual(self.r.store.get_block(b)["status"], "success")
+        self.assertIn("c ran", self.output(c["id"]))
+
+    def test_pipeline_runs_all_blocks_sequentially(self):
+        # three independent roots — the sequential worker must start every one
+        ids = [self.r.store.create_block("n%d" % i, script="print('ok')\n")["id"]
+               for i in range(3)]
+        self.r.run_pipeline()
+        for i in ids:
+            self.wait_status(i, "success", 20)
+
     def test_fix_and_rerun_resumes_chain(self):
         a, b = self._chain("import sys\nsys.exit(1)\n", "print('downstream ran')\n")
         self.r.run_pipeline()
