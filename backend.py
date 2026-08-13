@@ -14,6 +14,10 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pipeline import store, presets
+from pipeline.runner import Runner
+
 NAME_RE = re.compile(r'^[A-Za-z0-9_.-]+$')
 ACTIONS = {'start', 'stop', 'restart'}
 
@@ -54,6 +58,7 @@ class Config:
     token_file = None
     web_dir = None
     token = None
+    runner = None
 
 
 def run_monitor(args, timeout=30):
@@ -187,6 +192,54 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(401, {'error': 'unauthorized'})
         return self._api_post(path)
 
+    def do_PUT(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not path.startswith('/api/'):
+            return self._send_json(404, {'error': 'not found'})
+        if not self._authed():
+            return self._send_json(401, {'error': 'unauthorized'})
+        m = re.match(r'^/api/blocks/([^/]+)$', path)
+        if not m:
+            return self._send_json(404, {'error': 'not found'})
+        name = m.group(1)
+        if not NAME_RE.match(name):
+            return self._send_json(400, {'error': 'bad name'})
+        if not Config.runner.store.get_block(name):
+            return self._send_json(404, {'error': 'unknown block'})
+        body = self._read_json_body()
+        if body is None:
+            return self._send_json(400, {'error': 'bad json'})
+        fields = self._block_fields(body)
+        if 'name' in body:
+            fields['name'] = body['name']
+        try:
+            Config.runner.store.update_block(name, fields, script=body.get('script'))
+        except (store.ValidationError, store.CycleError) as e:
+            return self._send_json(400, {'error': str(e)})
+        log_event('info', 'blocks', 'updated block %s' % name)
+        return self._send_json(200, {'ok': True})
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not path.startswith('/api/'):
+            return self._send_json(404, {'error': 'not found'})
+        if not self._authed():
+            return self._send_json(401, {'error': 'unauthorized'})
+        m = re.match(r'^/api/blocks/([^/]+)$', path)
+        if not m:
+            return self._send_json(404, {'error': 'not found'})
+        name = m.group(1)
+        if not NAME_RE.match(name):
+            return self._send_json(400, {'error': 'bad name'})
+        if Config.runner.is_running(name):
+            Config.runner.stop_block(name)
+        if not Config.runner.store.delete_block(name):
+            return self._send_json(404, {'error': 'unknown block'})
+        log_event('info', 'blocks', 'deleted block %s' % name)
+        return self._send_json(200, {'ok': True})
+
     def _api_get(self, path, query):
         if path == '/api/state':
             try:
@@ -215,6 +268,17 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             return self._get_compose(m.group(1))
 
+        if path == '/api/blocks':
+            return self._blocks_list()
+
+        m = re.match(r'^/api/blocks/([^/]+)/output$', path)
+        if m:
+            return self._block_output(m.group(1), query)
+
+        m = re.match(r'^/api/blocks/([^/]+)$', path)
+        if m:
+            return self._block_get(m.group(1))
+
         return self._send_json(404, {'error': 'not found'})
 
     def _get_compose(self, name):
@@ -234,6 +298,57 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._send_json(500, {'error': str(e)})
         return self._send_json(200, {'name': name, 'compose_file': svc['compose_file'], 'content': content})
+
+    # --- script blocks (pipeline) -----------------------------------------
+
+    ALLOWED_BLOCK_FIELDS = (
+        'type', 'mode', 'venv', 'requirements', 'args',
+        'timeout', 'port', 'start_period', 'depends_on', 'pass_stdout',
+    )
+
+    def _block_fields(self, body):
+        return {k: body[k] for k in self.ALLOWED_BLOCK_FIELDS if k in body}
+
+    def _blocks_list(self):
+        data = Config.runner.store.load()
+        blocks = data['blocks']
+        try:
+            levels = store.topo_levels(blocks)
+        except store.CycleError:
+            levels = {bid: 0 for bid in blocks}
+        keys = ('id', 'name', 'type', 'mode', 'venv', 'status', 'exit_code',
+                'depends_on', 'pass_stdout', 'port', 'timeout', 'started_at',
+                'finished_at', 'last_error')
+        out = []
+        for bid, b in blocks.items():
+            item = {k: b.get(k) for k in keys}
+            item['level'] = levels.get(bid, 0)
+            out.append(item)
+        out.sort(key=lambda x: (x['level'], x['id']))
+        return self._send_json(200, {'blocks': out, 'generated_at': data.get('generated_at')})
+
+    def _block_get(self, name):
+        if not NAME_RE.match(name):
+            return self._send_json(400, {'error': 'bad name'})
+        block = Config.runner.store.get_block(name)
+        if not block:
+            return self._send_json(404, {'error': 'unknown block'})
+        payload = dict(block)
+        payload['script'] = Config.runner.store.read_script(block)
+        return self._send_json(200, payload)
+
+    def _block_output(self, name, query):
+        if not NAME_RE.match(name):
+            return self._send_json(400, {'error': 'bad name'})
+        if not Config.runner.store.get_block(name):
+            return self._send_json(404, {'error': 'unknown block'})
+        since = 0
+        if 'since' in query:
+            try:
+                since = max(0, int(query['since'][0]))
+            except ValueError:
+                pass
+        return self._send_json(200, Config.runner.output(name, since))
 
     def _api_post(self, path):
         m = re.match(r'^/api/services/([^/]+)/(start|stop|restart)$', path)
@@ -290,6 +405,54 @@ class Handler(BaseHTTPRequestHandler):
             content = body.get('content', '')
             apply_ = bool(body.get('apply', False))
             return self._save_compose(name, content, apply_)
+
+        if path == '/api/blocks':
+            body = self._read_json_body()
+            if body is None:
+                return self._send_json(400, {'error': 'bad json'})
+            name = (body.get('name') or '').strip()
+            if not name:
+                return self._send_json(400, {'error': 'name required'})
+            try:
+                block = Config.runner.store.create_block(
+                    name, script=body.get('script', ''), **self._block_fields(body))
+            except (store.ValidationError, store.CycleError) as e:
+                return self._send_json(400, {'error': str(e)})
+            log_event('info', 'blocks', 'created block %s' % block['id'])
+            return self._send_json(201, {'ok': True, 'id': block['id']})
+
+        m = re.match(r'^/api/blocks/([^/]+)/(run|stop|restart)$', path)
+        if m:
+            name, action = m.group(1), m.group(2)
+            if not NAME_RE.match(name):
+                return self._send_json(400, {'error': 'bad name'})
+            if not Config.runner.store.get_block(name):
+                return self._send_json(404, {'error': 'unknown block'})
+            getattr(Config.runner, action + '_block')(name)
+            return self._send_json(202, {'ok': True, 'queued': True})
+
+        if path == '/api/pipeline/run':
+            try:
+                Config.runner.run_pipeline()
+            except (store.ValidationError, store.CycleError) as e:
+                return self._send_json(400, {'error': str(e)})
+            return self._send_json(202, {'ok': True})
+
+        if path == '/api/pipeline/stop':
+            Config.runner.stop_pipeline()
+            return self._send_json(202, {'ok': True})
+
+        if path == '/api/pipeline/presets':
+            body = self._read_json_body() or {}
+            which = body.get('set', 'demo')
+            if which not in presets.PRESET_SETS:
+                return self._send_json(400, {'error': 'unknown preset set'})
+            try:
+                created = presets.seed(Config.runner.store, which)
+            except (store.ValidationError, store.CycleError) as e:
+                return self._send_json(400, {'error': str(e)})
+            log_event('info', 'blocks', 'loaded %d preset block(s) from %s' % (created, which))
+            return self._send_json(201, {'ok': True, 'created': created, 'set': which})
 
         return self._send_json(404, {'error': 'not found'})
 
@@ -362,6 +525,15 @@ def main():
 
     with open(Config.token_file) as f:
         Config.token = f.read().strip()
+
+    fresh_pipeline = not os.path.exists(os.path.join(args.monitor_dir, 'state', 'pipeline.json'))
+    Config.runner = Runner(args.monitor_dir, log=log_event)
+    if fresh_pipeline:
+        try:
+            n = presets.seed(Config.runner.store)
+            log_event('info', 'blocks', 'seeded %d demo block(s) on first run' % n)
+        except Exception as e:
+            log_event('error', 'blocks', 'preset seed failed: %s' % e)
 
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
     print(f'monitor backend listening on {args.bind}:{args.port}', file=sys.stderr)

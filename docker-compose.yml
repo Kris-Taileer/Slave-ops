@@ -1,0 +1,26 @@
+# One container for the whole thing. Every script block runs as a child process
+# inside it, so all of their traffic and ports surface on the host directly.
+#
+# NOTE: network_mode: host is a Linux feature (the intended target — a vulnbox).
+# On Docker Desktop for macOS host networking is limited; run the panel with
+# `python3 backend.py` locally there instead.
+services:
+  aether:
+    build: .
+    container_name: aether-blocks
+    # Blocks' listening ports land straight on the host network.
+    network_mode: host
+    # Reap the many short-lived subprocesses blocks spawn (PID 1 = init).
+    init: true
+    environment:
+      # Panel port. With host networking the container binds it on the host.
+      MONITOR_PORT: "8080"
+      # Loopback by default: running arbitrary scripts over the network is RCE
+      # by design (like Jenkins). Reach it via SSH tunnel, or set 0.0.0.0 and
+      # firewall the port to your team only. The Bearer token still gates the API.
+      MONITOR_BIND: "127.0.0.1"
+    volumes:
+      # Persist definitions, tokens, logs and each block's scripts/venvs/output.
+      - ./state:/app/state
+      - ./blocks:/app/blocks
+    restart: unless-stopped

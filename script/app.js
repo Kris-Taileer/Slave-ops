@@ -46,134 +46,27 @@ async function apiPost(path) {
   return data;
 }
 
-const services = [
-  {
-    id: 'web',
-    name: 'web-service',
-    status: 'up',
-    ports: '80, 443',
-    containers: 'nginx + app',
-    vulns: [],
-    compose: `version: "3.8"
-services:
-  web:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    restart: unless-stopped
-    networks:
-      - ad_net
-  app:
-    image: team-web:latest
-    expose:
-      - "3000"
-    networks:
-      - ad_net
-
-networks:
-  ad_net:
-    external: true`
-  },
-  {
-    id: 'api',
-    name: 'api-gateway',
-    status: 'up',
-    ports: '8080',
-    containers: 'api + redis',
-    vulns: [],
-    compose: `version: "3.8"
-services:
-  api:
-    image: api:latest
-    ports:
-      - "8080:8080"
-    environment:
-      - REDIS_URL=redis:6379
-    depends_on:
-      - redis
-    networks:
-      - ad_net
-  redis:
-    image: redis:alpine
-    networks:
-      - ad_net
-
-networks:
-  ad_net:
-    external: true`
-  },
-  {
-    id: 'db',
-    name: 'postgres-db',
-    status: 'warn',
-    ports: '5432',
-    containers: 'postgres',
-    vulns: [],
-    compose: `version: "3.8"
-services:
-  db:
-    image: postgres:15-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_PASSWORD: supersecret
-      POSTGRES_DB: ad
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    networks:
-      - ad_net
-
-volumes:
-  pgdata:
-
-networks:
-  ad_net:
-    external: true`
-  },
-  {
-    id: 'checker',
-    name: 'checker',
-    status: 'down',
-    ports: '9000',
-    containers: 'checker',
-    vulns: [],
-    compose: `version: "3.8"
-services:
-  checker:
-    image: checker:latest
-    ports:
-      - "9000:9000"
-    restart: always
-    networks:
-      - ad_net
-
-networks:
-  ad_net:
-    external: true`
-  },
-  {
-    id: 'sploit',
-    name: 'sploit-runner',
-    status: 'up',
-    ports: '—',
-    containers: 'sploit',
-    vulns: [],
-    compose: `version: "3.8"
-services:
-  sploit:
-    image: sploit:latest
-    environment:
-      - TEAM_TOKEN=xxx
-      - FARM_URL=http://farm:31337
-    networks:
-      - ad_net
-
-networks:
-  ad_net:
-    external: true`
+// General authed request helper (GET/POST/PUT/DELETE + JSON), used by the
+// Blocks tab which — unlike the mock tabs above — talks to the real backend.
+async function api(method, path, body) {
+  const token = getToken();
+  if (!token) throw new Error('нет токена');
+  const opt = { method, headers: { 'Authorization': `Bearer ${token}` } };
+  if (body !== undefined) {
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
   }
-];
+  const res = await fetch(API_BASE + path, opt);
+  if (res.status === 401) { localStorage.removeItem(TOKEN_KEY); throw new Error('неверный токен'); }
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+  return data;
+}
+
+// Real docker-compose services are managed via monitor.sh / the backend API.
+// The old hardcoded stub services were removed; this list is intentionally empty.
+const services = [];
 
 const utils = [
   {
@@ -206,52 +99,12 @@ const utils = [
   }
 ];
 
-const networkInfo = [
-  { title: 'Board Address', value: '10.10.10.1', sub: 'jury / checksystem' },
-  { title: 'Team Range', value: '10.60.1.0 — 10.60.16.0', sub: '16 команд' },
-  { title: 'Protocol', value: 'TCP + HTTP', sub: 'flag submission' },
-  { title: 'First / Last IP', value: '10.60.1.2 / 10.60.16.2', sub: 'vulnbox' },
-  { title: 'Docker Network', value: 'ad_net', sub: 'overlay' },
-  { title: 'VPN', value: 'WireGuard', sub: 'active · 16 peers' }
-];
+// Network / logs / vulnerability panels no longer ship stub data.
+const networkInfo = [];
 
-let logs = [
-  { time: '11:28:01', level: 'info', msg: 'Aether panel started' },
-  { time: '11:28:03', level: 'success', msg: 'Discovered 5 services in /services' },
-  { time: '11:28:05', level: 'info', msg: 'Packmate is up on :8081' },
-  { time: '11:28:06', level: 'info', msg: 'Farm worker + submitter started' },
-  { time: '11:28:08', level: 'success', msg: 'Firegex deployed successfully' },
-  { time: '11:29:12', level: 'warn', msg: 'postgres-db high memory (82%)' },
-  { time: '11:30:01', level: 'info', msg: 'Healthcheck cycle started' },
-  { time: '11:30:04', level: 'error', msg: 'checker is DOWN — connection refused :9000' },
-  { time: '11:30:15', level: 'info', msg: 'Ping cycle completed' }
-];
+let logs = [];
 
-const vulnDatabase = {
-  web: [
-    { severity: 'high', title: 'Default credentials: admin / admin' },
-    { severity: 'medium', title: 'Directory listing enabled on /uploads' },
-    { severity: 'low', title: 'Server version disclosed in headers' }
-  ],
-  api: [
-    { severity: 'high', title: 'Unauthenticated /admin endpoint' },
-    { severity: 'high', title: 'JWT secret is "secret"' },
-    { severity: 'medium', title: 'CORS allows *' }
-  ],
-  db: [
-    { severity: 'high', title: 'PostgreSQL default password "postgres"' },
-    { severity: 'medium', title: 'Port 5432 exposed externally' },
-    { severity: 'low', title: 'No SSL on database connection' }
-  ],
-  checker: [
-    { severity: 'high', title: 'Hardcoded flag in source' },
-    { severity: 'medium', title: 'Debug mode enabled' }
-  ],
-  sploit: [
-    { severity: 'medium', title: 'Team token visible in env' },
-    { severity: 'low', title: 'No rate limiting on farm submit' }
-  ]
-};
+const vulnDatabase = {};
 
 let currentTab = 'services';
 let currentComposeId = null;
@@ -268,6 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupNav();
     setupCompose();
     setupActions();
+    initBlocks();
     updateLastTime();
     updateGlobalStatus();
 
@@ -402,6 +256,7 @@ function switchTab(tab) {
 
   const titles = {
     services: ['Сервисы', 'Управление и мониторинг'],
+    blocks: ['Блоки', 'Конвейер скриптов'],
     compose: ['Compose', 'Редактирование docker-compose.yaml'],
     utils: ['Утилиты', 'Packmate · Ферма · Firegex'],
     network: ['Сеть', 'Информация о инфраструктуре'],
@@ -416,6 +271,15 @@ function switchTab(tab) {
   if (tab === 'logs') renderLogs();
   if (tab === 'compose' && editor && !usePlainTextarea) {
     setTimeout(() => { try { editor.refresh(); } catch(e) {} }, 40);
+  }
+  if (tab === 'blocks') {
+    loadBlocks();
+    startBlocksPolling();
+    if (selectedBlockId) startOutputPolling();
+    if (blockEditor) setTimeout(() => { try { blockEditor.refresh(); } catch (e) {} }, 40);
+  } else {
+    stopBlocksPolling();
+    stopOutputPolling();
   }
 }
 
@@ -722,4 +586,404 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+/* ============================================================================
+ * Blocks / pipeline tab — talks to the real backend (pipeline.store + runner)
+ * ==========================================================================*/
+
+let blocksData = [];
+let selectedBlockId = null;
+let blockEditor = null;
+let blockOutputOffset = 0;
+let blocksTimer = null;
+let outputTimer = null;
+let connectFrom = null;   // id of the block a connect-drag started from
+
+function initBlocks() {
+  renderLegend();
+  const ta = document.getElementById('block-editor');
+  if (ta && typeof CodeMirror !== 'undefined') {
+    try {
+      blockEditor = CodeMirror.fromTextArea(ta, {
+        mode: 'python', theme: 'material-palenight',
+        lineNumbers: true, indentUnit: 4, tabSize: 4, lineWrapping: true
+      });
+    } catch (e) { blockEditor = null; }
+  }
+  document.getElementById('block-add')?.addEventListener('click', addBlock);
+  document.getElementById('blocks-preset')?.addEventListener('click', () => loadPresets('demo'));
+  document.getElementById('blocks-preset-intro')?.addEventListener('click', () => loadPresets('intro'));
+  document.getElementById('pipeline-run')?.addEventListener('click', () => {
+    api('POST', '/api/pipeline/run')
+      .then(() => { toast('info', 'Пайплайн запущен'); loadBlocks(); })
+      .catch(err => toast('error', err.message));
+  });
+  document.getElementById('pipeline-stop')?.addEventListener('click', () => {
+    api('POST', '/api/pipeline/stop')
+      .then(() => { toast('warn', 'Остановлено'); loadBlocks(); })
+      .catch(err => toast('error', err.message));
+  });
+  document.getElementById('insp-close')?.addEventListener('click', closeInspector);
+  document.getElementById('insp-run')?.addEventListener('click', () => blockAction('run'));
+  document.getElementById('insp-stop')?.addEventListener('click', () => blockAction('stop'));
+  document.getElementById('insp-restart')?.addEventListener('click', () => blockAction('restart'));
+  document.getElementById('insp-delete')?.addEventListener('click', deleteSelected);
+  document.getElementById('insp-save')?.addEventListener('click', saveSelected);
+  document.getElementById('insp-type')?.addEventListener('change', onTypeModeChange);
+  document.getElementById('insp-mode')?.addEventListener('change', onTypeModeChange);
+  document.getElementById('insp-venv')?.addEventListener('change', onTypeModeChange);
+
+  // drag-to-connect + edge delete + modal dismiss
+  document.addEventListener('mousemove', moveConnect);
+  document.addEventListener('mouseup', endConnect);
+  document.getElementById('graph-hit')?.addEventListener('click', onEdgeClick);
+  const modal = document.getElementById('block-modal');
+  modal?.addEventListener('mousedown', (e) => { if (e.target === modal) closeInspector(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal && !modal.hidden) closeInspector();
+  });
+}
+
+function renderLegend() {
+  const el = document.getElementById('blocks-legend');
+  if (!el) return;
+  const items = [
+    ['running', 'работает', 'var(--purple)'],
+    ['success', 'успех', 'var(--success)'],
+    ['error', 'ошибка/завис', 'var(--danger)'],
+    ['blocked', 'ждёт/очередь', 'var(--warning)'],
+    ['idle', 'idle/стоп', 'var(--text-muted)'],
+  ];
+  el.innerHTML = items.map(([, label, color]) =>
+    `<span class="lg"><span class="dot" style="background:${color}"></span>${label}</span>`).join('');
+}
+
+function startBlocksPolling() { stopBlocksPolling(); blocksTimer = setInterval(loadBlocks, 2000); }
+function stopBlocksPolling() { if (blocksTimer) clearInterval(blocksTimer); blocksTimer = null; }
+function startOutputPolling() { stopOutputPolling(); pollOutput(); outputTimer = setInterval(pollOutput, 1000); }
+function stopOutputPolling() { if (outputTimer) clearInterval(outputTimer); outputTimer = null; }
+
+function statusClass(s) { return 'st-' + (s === 'hanging' ? 'error' : s); }
+
+function loadBlocks() {
+  return api('GET', '/api/blocks').then(data => {
+    blocksData = data.blocks || [];
+    renderGraph();
+    if (selectedBlockId) {
+      const b = blocksData.find(x => x.id === selectedBlockId);
+      if (b) setInspStatus(b.status);
+      else closeInspector();
+    }
+  }).catch(err => {
+    if (currentTab === 'blocks') toast('error', 'Блоки: ' + err.message);
+  });
+}
+
+function nodeHtml(b) {
+  const badges = [b.type, b.mode];
+  if (b.venv) badges.push('venv');
+  if (b.pass_stdout) badges.push('argv');
+  const id = escapeHtml(b.id);
+  return `
+  <div class="block-node ${statusClass(b.status)} ${b.id === selectedBlockId ? 'selected' : ''}" data-id="${id}">
+    <div class="bn-name">
+      <span>${escapeHtml(b.name)}</span>
+      <span class="bn-status ${statusClass(b.status)}">${escapeHtml(b.status)}</span>
+    </div>
+    <div class="bn-badges">${badges.map(x => `<span class="bn-badge">${escapeHtml(x)}</span>`).join('')}</div>
+    <div class="bn-actions">
+      <button class="btn btn-success" title="Run" onclick="event.stopPropagation();nodeAction('${id}','run')">▶</button>
+      <button class="btn btn-danger" title="Stop" onclick="event.stopPropagation();nodeAction('${id}','stop')">■</button>
+      <button class="btn btn-ghost" title="Открыть" onclick="event.stopPropagation();selectBlock('${id}')">✎</button>
+    </div>
+    <span class="bn-handle" data-src="${id}" title="Потяни к другому блоку, чтобы связать"></span>
+  </div>`;
+}
+
+function renderGraph() {
+  const cols = {};
+  blocksData.forEach(b => { (cols[b.level] = cols[b.level] || []).push(b); });
+  const keys = Object.keys(cols).map(Number).sort((a, b) => a - b);
+  const columnsEl = document.getElementById('graph-columns');
+  const emptyEl = document.getElementById('graph-empty');
+  if (!columnsEl) return;
+  columnsEl.innerHTML = keys.map(k =>
+    `<div class="graph-col">${cols[k].map(nodeHtml).join('')}</div>`).join('');
+  if (emptyEl) emptyEl.style.display = blocksData.length ? 'none' : 'flex';
+  columnsEl.querySelectorAll('.block-node').forEach(n =>
+    n.addEventListener('click', () => selectBlock(n.dataset.id)));
+  columnsEl.querySelectorAll('.bn-handle').forEach(h =>
+    h.addEventListener('mousedown', (e) => startConnect(e, h.dataset.src)));
+  requestAnimationFrame(drawEdges);
+}
+
+function drawEdges() {
+  const svg = document.getElementById('graph-edges');
+  const hit = document.getElementById('graph-hit');
+  const graph = document.getElementById('blocks-graph');
+  if (!svg || !hit || !graph) return;
+  const w = graph.scrollWidth, h = graph.scrollHeight;
+  [svg, hit].forEach(s => { s.setAttribute('width', w); s.setAttribute('height', h); });
+  const gr = graph.getBoundingClientRect();
+  const byId = {}; blocksData.forEach(b => byId[b.id] = b);
+  const defs = '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+    + 'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+    + '<path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>';
+  let vis = defs, hits = '';
+  blocksData.forEach(b => {
+    const toEl = graph.querySelector(`.block-node[data-id="${cssAttr(b.id)}"]`);
+    if (!toEl) return;
+    const tr = toEl.getBoundingClientRect();
+    (b.depends_on || []).forEach(dep => {
+      const fromEl = graph.querySelector(`.block-node[data-id="${cssAttr(dep)}"]`);
+      if (!fromEl) return;
+      const fr = fromEl.getBoundingClientRect();
+      const x1 = fr.right - gr.left + graph.scrollLeft;
+      const y1 = fr.top + fr.height / 2 - gr.top + graph.scrollTop;
+      const x2 = tr.left - gr.left + graph.scrollLeft;
+      const y2 = tr.top + tr.height / 2 - gr.top + graph.scrollTop;
+      const mx = (x1 + x2) / 2;
+      const src = byId[dep] ? byId[dep].status : 'idle';
+      const cls = src === 'success' ? 'ok'
+        : (['error', 'hanging', 'blocked', 'stopped'].includes(src) ? 'bad' : '');
+      const d = `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+      vis += `<path class="edge ${cls}" d="${d}" marker-end="url(#arrow)"/>`;
+      hits += `<path class="edge-hit" data-from="${escapeHtml(dep)}" data-to="${escapeHtml(b.id)}" d="${d}"/>`;
+    });
+  });
+  svg.innerHTML = vis;
+  hit.innerHTML = hits;
+}
+
+/* --- drag-to-connect + edge delete --- */
+
+function graphPoint(clientX, clientY) {
+  const graph = document.getElementById('blocks-graph');
+  const gr = graph.getBoundingClientRect();
+  return { x: clientX - gr.left + graph.scrollLeft, y: clientY - gr.top + graph.scrollTop };
+}
+
+function startConnect(e, fromId) {
+  e.preventDefault();
+  e.stopPropagation();
+  connectFrom = fromId;
+  stopBlocksPolling();               // freeze the graph while wiring
+  document.body.style.userSelect = 'none';
+}
+
+function moveConnect(e) {
+  if (!connectFrom) return;
+  const graph = document.getElementById('blocks-graph');
+  const drag = document.getElementById('graph-drag');
+  const fromEl = graph && graph.querySelector(`.block-node[data-id="${cssAttr(connectFrom)}"]`);
+  if (!fromEl || !drag) return;
+  const gr = graph.getBoundingClientRect();
+  const fr = fromEl.getBoundingClientRect();
+  const x1 = fr.right - gr.left + graph.scrollLeft;
+  const y1 = fr.top + fr.height / 2 - gr.top + graph.scrollTop;
+  const p = graphPoint(e.clientX, e.clientY);
+  const mx = (x1 + p.x) / 2;
+  drag.setAttribute('width', graph.scrollWidth);
+  drag.setAttribute('height', graph.scrollHeight);
+  drag.innerHTML = `<path class="dragline" d="M${x1},${y1} C${mx},${y1} ${mx},${p.y} ${p.x},${p.y}"/>`;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const tgt = el && el.closest ? el.closest('.block-node') : null;
+  document.querySelectorAll('.block-node.drop-target').forEach(n => n.classList.remove('drop-target'));
+  if (tgt && tgt.dataset.id !== connectFrom) tgt.classList.add('drop-target');
+}
+
+function endConnect(e) {
+  if (!connectFrom) return;
+  const from = connectFrom;
+  connectFrom = null;
+  document.body.style.userSelect = '';
+  const drag = document.getElementById('graph-drag');
+  if (drag) drag.innerHTML = '';
+  document.querySelectorAll('.block-node.drop-target').forEach(n => n.classList.remove('drop-target'));
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const tgt = el && el.closest ? el.closest('.block-node') : null;
+  if (tgt && tgt.dataset.id && tgt.dataset.id !== from) {
+    addEdge(from, tgt.dataset.id);   // target depends on source
+  } else {
+    startBlocksPolling();
+  }
+}
+
+function addEdge(from, to) {
+  const b = blocksData.find(x => x.id === to);
+  const deps = ((b && b.depends_on) || []).slice();
+  if (deps.includes(from)) { toast('info', 'Связь уже есть'); startBlocksPolling(); return; }
+  deps.push(from);
+  api('PUT', '/api/blocks/' + encodeURIComponent(to), { depends_on: deps })
+    .then(() => { toast('success', `связь ${from} → ${to}`); return loadBlocks(); })
+    .catch(err => toast('error', err.message))
+    .finally(() => startBlocksPolling());
+}
+
+function removeEdge(from, to) {
+  const b = blocksData.find(x => x.id === to);
+  const deps = ((b && b.depends_on) || []).filter(d => d !== from);
+  api('PUT', '/api/blocks/' + encodeURIComponent(to), { depends_on: deps })
+    .then(() => { toast('warn', `связь ${from} → ${to} удалена`); return loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function onEdgeClick(e) {
+  const t = e.target;
+  const from = t && t.getAttribute && t.getAttribute('data-from');
+  const to = t && t.getAttribute && t.getAttribute('data-to');
+  if (from && to && confirm(`Удалить связь ${from} → ${to}?`)) removeEdge(from, to);
+}
+
+function cssAttr(s) { return String(s).replace(/"/g, '\\"'); }
+
+function selectBlock(id) {
+  selectedBlockId = id;
+  document.querySelectorAll('.block-node').forEach(n => n.classList.toggle('selected', n.dataset.id === id));
+  api('GET', '/api/blocks/' + encodeURIComponent(id)).then(b => {
+    document.getElementById('block-modal').hidden = false;
+    document.getElementById('insp-name').value = b.name || '';
+    document.getElementById('insp-type').value = b.type || 'python';
+    document.getElementById('insp-mode').value = b.mode || 'task';
+    document.getElementById('insp-venv').checked = !!b.venv;
+    document.getElementById('insp-req').value = b.requirements || '';
+    document.getElementById('insp-args').value = (b.args || []).join(' ');
+    document.getElementById('insp-timeout').value = b.timeout != null ? b.timeout : 60;
+    document.getElementById('insp-port').value = b.port != null ? b.port : '';
+    document.getElementById('insp-pass').checked = !!b.pass_stdout;
+    fillDeps(id, b.depends_on || []);
+    setInspStatus(b.status);
+    if (blockEditor) {
+      blockEditor.setOption('mode', b.type === 'sh' ? 'shell' : 'python');
+      blockEditor.setValue(b.script || '');
+      setTimeout(() => { try { blockEditor.refresh(); } catch (e) {} }, 30);
+    } else {
+      document.getElementById('block-editor').value = b.script || '';
+    }
+    onTypeModeChange();
+    blockOutputOffset = 0;
+    document.getElementById('block-output').textContent = '';
+    startOutputPolling();
+  }).catch(err => toast('error', err.message));
+}
+
+function fillDeps(id, selected) {
+  const sel = document.getElementById('insp-deps');
+  sel.innerHTML = blocksData.filter(b => b.id !== id).map(b =>
+    `<option value="${escapeHtml(b.id)}" ${selected.includes(b.id) ? 'selected' : ''}>${escapeHtml(b.name)}</option>`
+  ).join('') || '<option disabled>нет других блоков</option>';
+}
+
+function setInspStatus(status) {
+  const el = document.getElementById('insp-status');
+  if (!el) return;
+  el.textContent = status;
+  el.className = 'insp-status ' + statusClass(status);
+}
+
+function onTypeModeChange() {
+  const type = document.getElementById('insp-type').value;
+  const mode = document.getElementById('insp-mode').value;
+  const venv = document.getElementById('insp-venv').checked;
+  document.getElementById('insp-venv-wrap').style.display = type === 'python' ? 'flex' : 'none';
+  document.getElementById('insp-req-wrap').style.display = (type === 'python' && venv) ? 'flex' : 'none';
+  document.getElementById('insp-timeout-wrap').style.display = mode === 'task' ? 'flex' : 'none';
+  document.getElementById('insp-port-wrap').style.display = mode === 'service' ? 'flex' : 'none';
+  if (blockEditor) blockEditor.setOption('mode', type === 'sh' ? 'shell' : 'python');
+}
+
+function closeInspector() {
+  selectedBlockId = null;
+  stopOutputPolling();
+  const modal = document.getElementById('block-modal');
+  if (modal) modal.hidden = true;
+  document.querySelectorAll('.block-node').forEach(n => n.classList.remove('selected'));
+}
+
+function collectForm() {
+  const args = document.getElementById('insp-args').value.trim();
+  const portVal = document.getElementById('insp-port').value.trim();
+  const deps = Array.from(document.getElementById('insp-deps').selectedOptions)
+    .map(o => o.value).filter(v => v);
+  return {
+    name: document.getElementById('insp-name').value.trim() || selectedBlockId,
+    type: document.getElementById('insp-type').value,
+    mode: document.getElementById('insp-mode').value,
+    venv: document.getElementById('insp-venv').checked,
+    requirements: document.getElementById('insp-req').value,
+    args: args ? args.split(/\s+/) : [],
+    timeout: parseInt(document.getElementById('insp-timeout').value, 10) || 0,
+    port: portVal ? parseInt(portVal, 10) : null,
+    depends_on: deps,
+    pass_stdout: document.getElementById('insp-pass').checked,
+    script: blockEditor ? blockEditor.getValue() : document.getElementById('block-editor').value,
+  };
+}
+
+function saveSelected() {
+  if (!selectedBlockId) return;
+  api('PUT', '/api/blocks/' + encodeURIComponent(selectedBlockId), collectForm())
+    .then(() => { toast('success', 'Сохранено'); return loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function blockAction(action) {
+  if (!selectedBlockId) return;
+  api('POST', `/api/blocks/${encodeURIComponent(selectedBlockId)}/${action}`)
+    .then(() => {
+      toast('info', `${selectedBlockId}: ${action}`);
+      blockOutputOffset = 0;
+      document.getElementById('block-output').textContent = '';
+      startOutputPolling();
+      loadBlocks();
+    })
+    .catch(err => toast('error', err.message));
+}
+
+function nodeAction(id, action) {
+  api('POST', `/api/blocks/${encodeURIComponent(id)}/${action}`)
+    .then(() => { toast('info', `${id}: ${action}`); loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function deleteSelected() {
+  if (!selectedBlockId) return;
+  if (!confirm(`Удалить блок ${selectedBlockId}?`)) return;
+  api('DELETE', '/api/blocks/' + encodeURIComponent(selectedBlockId))
+    .then(() => { toast('warn', 'Удалён'); closeInspector(); loadBlocks(); })
+    .catch(err => toast('error', err.message));
+}
+
+function addBlock() {
+  const name = (prompt('Имя нового блока:') || '').trim();
+  if (!name) return;
+  api('POST', '/api/blocks', { name, type: 'python', script: '' })
+    .then(r => { toast('success', 'Блок создан'); return loadBlocks().then(() => selectBlock(r.id)); })
+    .catch(err => toast('error', err.message));
+}
+
+function loadPresets(set) {
+  api('POST', '/api/pipeline/presets', { set: set || 'demo' })
+    .then(r => {
+      const n = (r && r.created != null) ? ` (+${r.created})` : '';
+      toast('success', (set === 'intro' ? 'Сервисы загружены' : 'Примеры загружены') + n);
+      return loadBlocks();
+    })
+    .catch(err => toast('error', err.message));
+}
+
+function pollOutput() {
+  if (!selectedBlockId) return;
+  api('GET', `/api/blocks/${encodeURIComponent(selectedBlockId)}/output?since=${blockOutputOffset}`)
+    .then(r => {
+      const pre = document.getElementById('block-output');
+      if (!pre) return;
+      if (r.offset < blockOutputOffset) { pre.textContent = ''; }  // file truncated on rerun
+      if (r.data) { pre.textContent += r.data; pre.scrollTop = pre.scrollHeight; }
+      blockOutputOffset = r.offset;
+      const st = document.getElementById('insp-out-status');
+      if (st) st.textContent = r.status ? `· ${r.status}` : '';
+    })
+    .catch(() => {});
 }
